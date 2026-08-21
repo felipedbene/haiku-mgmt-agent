@@ -126,7 +126,24 @@ Absent, and each one broke something during this work: `curl`, `openssl`, `gcc`,
 `/dev/tcp` (built without netredir). `nohup setsid …` fails silently if its
 stderr is discarded — that cost a debugging cycle too.
 
-## 6. Known limitations (not defects)
+## 6. Not exercised live
+
+Stated explicitly so the matrix above is not read as broader than it is:
+
+- **CommandId dedup.** Implemented (`SeenCommands` in `src/main.cpp`, marked
+  before execution so a redelivery mid-run cannot start a second copy) and
+  reachable in unit-test terms, but MDS never redelivered a message during these
+  runs, so the re-acknowledge path has not fired against the real service. It is
+  still mandatory rather than speculative: the visibility timeout is 10 s and
+  commands can run far longer.
+- **Credential expiry/refresh.** Role credentials were valid for the whole
+  session (~6 h), so the refresh-on-`ExpiredToken` path is untested live.
+- **Long-run stability.** Longest continuous run so far is minutes, not days. The
+  clock re-check every health cycle exists precisely because drift is expected on
+  a platform with no NTP, but that has not been observed over a long period yet.
+- **Concurrent commands.** Not applicable — execution is deliberately serial.
+
+## 7. Known limitations (not defects)
 
 - **`cancelCommand` is acknowledged but not actioned.** Commands execute
   synchronously in the poll loop, so there is nothing in flight to interrupt when
