@@ -5,16 +5,29 @@
 
 ---
 
-## 0. Status: Stage 1 gate NOT passed — blocked, not failed
+## 0. Status: RESOLVED — option B implemented, Phase 1 MVP working
 
-`ssm:UpdateInstanceInformation` was **never successfully sent from the Haiku instance**, because
-the canonical Haiku/arm64 image has **no TLS capability of any kind**. This is a platform
-blocker, not an AWS rejection, and not an IAM problem.
+> **Update 2026-08-21.** This document is the spike log. It recorded a hard blocker; that
+> blocker was then resolved by **option B in §4** (static mbedTLS inside the binary), which
+> Felipe chose. Stage 1's gate passed and the Stage 2 MVP is working on a real instance.
+> Current state and evidence: [`README.md`](README.md) and [`TESTING.md`](TESTING.md).
+>
+> What changed relative to the original finding: nothing about the platform. haiku/arm64 still
+> has no OpenSSL, no HTTPS-capable curl, no compiler and no package repository. The agent works
+> *around* all of that by carrying its own TLS, HTTP client, JSON, SigV4 and trust anchors, and
+> by cross-compiling. One further blocker surfaced only once TLS worked — the clock boots at
+> 1970 and breaks certificate validation — and is documented in TESTING.md §5.1.
+
+### Original finding (2026-08-20): Stage 1 gate not passed — blocked, not failed
+
+`ssm:UpdateInstanceInformation` could not be sent from the Haiku instance at all, because the
+canonical Haiku/arm64 image has **no TLS capability of any kind**. This was a platform blocker,
+not an AWS rejection, and not an IAM problem.
 
 Per the Stage 1 rules ("HARD STOP and report if UpdateInstanceInformation is rejected for any
-reason other than IAM permissions"), Stage 2 was **not started**. No C++ was written.
+reason other than IAM permissions"), Stage 2 was not started at that point.
 
-**Phase 1 as designed has an unmet hard prerequisite: a TLS stack for haiku/arm64.**
+**Phase 1 as designed had an unmet hard prerequisite: a TLS stack for haiku/arm64.**
 
 ---
 
@@ -198,6 +211,21 @@ path to a working `haiku-mgmt-agent` and keeps the blast radius inside one binar
 more to the wider Haiku/arm64 effort and would be the right call if the OpenSSH RSA win and
 other ports matter. Either way it is a **Phase 0.5** with its own scope, not a footnote in
 Stage 2 — and C is worth doing regardless, since it is nearly free.
+
+### Outcome: B, and it was the right size
+
+Felipe chose B. Actual cost, for calibration against the estimates above:
+
+- mbedTLS 3.6.2 cross-compiled for haiku/arm64 **first try, no patches** — plain `make lib`
+  with `CC`/`AR` overridden. Even `net_sockets.c` compiled, so Haiku's BSD sockets were enough.
+- The hand-rolled replacements for what mbedTLS does not provide came to roughly 600 lines:
+  HTTP/1.1 client, SigV4, JSON parser/serializer.
+- The dependency stayed inside one 1.35 MB binary. Nothing was installed system-wide on Haiku,
+  so nothing about the AMI had to change to accommodate it.
+
+Option A (a system-wide OpenSSL port) remains unbuilt and remains the more valuable
+contribution — it would regain RSA/ECDSA for OpenSSH (`ssh-access.md:173`) and unblock every
+other TLS-needing port. Option C was never needed as a fallback.
 
 ---
 

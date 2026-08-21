@@ -1,0 +1,28 @@
+# launch_daemon job for haiku-mgmt-agent. Installed as
+# /boot/system/settings/launch/haiku-mgmt-agent, which the *system*
+# launch_daemon reads (B_FIND_PATH_SETTINGS_DIRECTORY + "launch",
+# B_FIND_PATHS_SYSTEM_ONLY). Same placement and reasoning as the sshd and
+# cloud_init_lite jobs already on the Stage A AMI:
+#
+# - System context, not data/launch/user: the user target (app_server, Tracker,
+#   Deskbar) only runs inside a logged-in session, and on EC2 there is no
+#   framebuffer, so nothing there comes up reliably.
+#
+# - "service", not "job": launch_daemon restarts a service if the process dies.
+#   That is the behaviour we want for a management agent -- a crashed agent
+#   means an unmanageable instance.
+#
+# - "legacy": this is a POSIX daemon, not a launch-aware BApplication, so
+#   launch_daemon must not create and hand over a default port.
+#
+# No network condition is declared, deliberately. The agent retries IMDSv2 for
+# ~2 minutes at startup (kIdentityAttempts in src/main.cpp), so it tolerates
+# being started before the NIC is configured, and it also has to run early
+# enough to fix the clock: Haiku on EC2 boots at 1970-01-01 with no NTP client,
+# which breaks TLS for everything else on the box until the agent corrects it
+# (see TESTING.md).
+
+service x-vnd.haiku-mgmt-agent {
+	launch /boot/system/non-packaged/bin/haiku-mgmt-agent
+	legacy
+}

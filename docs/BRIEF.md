@@ -19,6 +19,8 @@ Question under evaluation: can we get SSM Agent — or an SSM-equivalent capabil
 - **SSM Agent assumes Linux.** systemd/init lifecycle, `ssm-user` + sudo provisioning, Linux PTY ioctls for Session Manager, FHS paths (`/etc/amazon/ssm`), rpm/deb packaging.
 - **What works for free:** IMDSv2 (`169.254.169.254`) is plain HTTP — instance identity, region, and IAM role credentials are already reachable from Haiku. ~~Curl and OpenSSL exist on Haiku. The C++ toolchain is first-class (it built the OS).~~
   > **Amendment, 2026-08-20 (Stage 1 spike):** the struck-through claim is **false for haiku/arm64**. It holds for Haiku/x86_64. On the canonical arm64 AMI there is no OpenSSL, no HTTPS-capable curl, no CA bundle and no compiler; HaikuPorts publishes no arm64 repository at all. IMDSv2 is reachable at the TCP level but there is no HTTP client to talk to it. A TLS stack for haiku/arm64 is therefore a **hard prerequisite for Phase 1**, not a given. See [`../NOTES.md`](../NOTES.md) §1 and §4.
+  >
+  > **Resolved, 2026-08-21:** the agent carries its own TLS (mbedTLS 3.6.2, cross-compiled and statically linked) plus its own HTTP/1.1 client, SigV4, JSON and trust anchors, and is cross-compiled on a Linux builder. Phase 1 works; see [`../TESTING.md`](../TESTING.md). Two further platform facts belong with this constraint: the clock boots at 1970-01-01 with no NTP client (breaks TLS and SigV4 until the agent corrects it from IMDS's `Date` header), and there is no `timegm`, `settimeofday`, `awk`, or `setsid`.
 - **One-person project, nights and weekends, competing with Stage 2 of the remote desktop work.** Scope discipline is a requirement, not a nice-to-have.
 
 ## 2. Decision (proposed)
