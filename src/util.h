@@ -12,6 +12,9 @@ namespace util {
 
 // ---- crypto (mbedTLS) ----
 std::string sha256_hex(const std::string& data);
+// Streaming digest of a file, for artifacts too big to slurp (self-update
+// binaries, S3 uploads). Returns "" when the file cannot be read.
+std::string sha256_file_hex(const std::string& path);
 std::string hmac_sha256(const std::string& key, const std::string& data);  // raw bytes out
 std::string to_hex(const std::string& raw);
 
@@ -46,5 +49,13 @@ std::string lower(std::string s);
 
 // Truncate to `max` bytes, appending `suffix` when it had to cut.
 std::string clip(const std::string& s, size_t max, const std::string& suffix = "");
+
+// SigV4 canonical URI encoding (RFC 3986 unreserved set). `encode_slash`
+// distinguishes path segments (false: '/' kept) from query values (true).
+std::string uri_encode(const std::string& s, bool encode_slash);
+
+// Compares dotted numeric versions ("0.1.0" < "0.2.0" < "0.10.0"). Non-numeric
+// tails compare as 0, so a malformed manifest can never look "newer".
+int version_compare(const std::string& a, const std::string& b);
 
 }  // namespace util

@@ -10,9 +10,11 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -167,15 +169,19 @@ int urandom_entropy(void*, unsigned char* out, size_t len) {
 
 struct Transport {
     virtual ~Transport() = default;
-    virtual bool write(const std::string& data, std::string& err) = 0;
+    virtual bool write(const char* data, size_t len, std::string& err) = 0;
+    bool write(const std::string& data, std::string& err) {
+        return write(data.data(), data.size(), err);
+    }
     virtual ssize_t read(char* buf, size_t len, std::string& err) = 0;
 };
 
 struct PlainTransport : Transport {
     Socket* sock;
     explicit PlainTransport(Socket* s) : sock(s) {}
-    bool write(const std::string& d, std::string& err) override {
-        return sock->send_all(d.data(), d.size(), err);
+    using Transport::write;
+    bool write(const char* d, size_t len, std::string& err) override {
+        return sock->send_all(d, len, err);
     }
     ssize_t read(char* buf, size_t len, std::string& err) override {
         return sock->recv_some(buf, len, err);
@@ -267,11 +273,12 @@ struct TlsTransport : Transport {
         return true;
     }
 
-    bool write(const std::string& d, std::string& err) override {
+    using Transport::write;
+    bool write(const char* d, size_t len, std::string& err) override {
         size_t sent = 0;
-        while (sent < d.size()) {
-            int rc = mbedtls_ssl_write(&ssl, reinterpret_cast<const unsigned char*>(d.data()) + sent,
-                                       d.size() - sent);
+        while (sent < len) {
+            int rc = mbedtls_ssl_write(&ssl, reinterpret_cast<const unsigned char*>(d) + sent,
+                                       len - sent);
             if (rc > 0) {
                 sent += static_cast<size_t>(rc);
                 continue;
@@ -348,13 +355,66 @@ bool read_headers(Transport& t, std::string& buf, Response& resp) {
     return true;
 }
 
-bool read_body(Transport& t, std::string& pending, Response& resp) {
+// Where decoded body bytes go: resp.body by default, or a file when the caller
+// asked to stream (S3 GET of a multi-hundred-MiB artifact must not live in RAM).
+class BodySink {
+public:
+    BodySink(Response* resp, const std::string& path) : resp_(resp) {
+        if (!path.empty()) {
+            file_ = std::fopen(path.c_str(), "wb");
+            if (!file_) {
+                resp_->error = "open(" + path + "): " + std::strerror(errno);
+                failed_ = true;
+            }
+        }
+    }
+    ~BodySink() {
+        if (file_) std::fclose(file_);
+    }
+    bool failed() const { return failed_; }
+    bool append(const char* data, size_t len) {
+        if (failed_) return false;
+        if (file_) {
+            if (std::fwrite(data, 1, len, file_) != len) {
+                resp_->error = std::string("short write to body file: ") + std::strerror(errno);
+                failed_ = true;
+                return false;
+            }
+        } else {
+            resp_->body.append(data, len);
+        }
+        resp_->sink_bytes += len;
+        return true;
+    }
+    bool finish() {
+        if (failed_) return false;
+        if (file_) {
+            if (std::fflush(file_) != 0 || ::fsync(::fileno(file_)) != 0) {
+                resp_->error = std::string("flush body file: ") + std::strerror(errno);
+                failed_ = true;
+                return false;
+            }
+        }
+        return true;
+    }
+
+private:
+    Response* resp_;
+    std::FILE* file_ = nullptr;
+    bool failed_ = false;
+};
+
+bool read_body(Transport& t, std::string& pending, Response& resp, BodySink& sink) {
     auto it = resp.headers.find("transfer-encoding");
     bool chunked = it != resp.headers.end() && util::lower(it->second).find("chunked") != std::string::npos;
+    if (sink.failed()) return false;
 
+    // Consume up to `want` bytes from the wire into `pending`, then drain
+    // `drain` of them into the sink. Keeps `pending` bounded even for bodies
+    // far larger than memory.
     auto fill = [&](size_t want) -> bool {
         while (pending.size() < want) {
-            char chunk[8192];
+            char chunk[64 * 1024];
             std::string err;
             ssize_t n = t.read(chunk, sizeof(chunk), err);
             if (n < 0) {
@@ -379,39 +439,60 @@ bool read_body(Transport& t, std::string& pending, Response& resp) {
             }
             size_t size = static_cast<size_t>(std::strtoul(pending.substr(0, nl).c_str(), nullptr, 16));
             pending.erase(0, nl + 2);
-            if (size == 0) return true;  // trailers ignored
-            if (!fill(size + 2)) {
+            if (size == 0) return sink.finish();  // trailers ignored
+            // Stream the chunk through in bounded pieces rather than fill()ing
+            // it whole: S3 is free to send one giant chunk.
+            size_t remaining = size;
+            while (remaining > 0) {
+                if (pending.empty() && !fill(1)) {
+                    resp.error = resp.error.empty() ? "truncated chunk" : resp.error;
+                    return false;
+                }
+                size_t take = std::min(remaining, pending.size());
+                if (!sink.append(pending.data(), take)) return false;
+                pending.erase(0, take);
+                remaining -= take;
+            }
+            if (!fill(2)) {  // CRLF after the chunk data
                 resp.error = resp.error.empty() ? "truncated chunk" : resp.error;
                 return false;
             }
-            resp.body.append(pending, 0, size);
-            pending.erase(0, size + 2);
+            pending.erase(0, 2);
         }
     }
 
     auto cl = resp.headers.find("content-length");
     if (cl != resp.headers.end()) {
         size_t want = static_cast<size_t>(std::strtoul(cl->second.c_str(), nullptr, 10));
-        if (!fill(want)) {
-            resp.error = resp.error.empty() ? "truncated body" : resp.error;
-            return false;
+        size_t remaining = want;
+        while (remaining > 0) {
+            if (pending.empty() && !fill(1)) {
+                resp.error = resp.error.empty() ? "truncated body" : resp.error;
+                return false;
+            }
+            size_t take = std::min(remaining, pending.size());
+            if (!sink.append(pending.data(), take)) return false;
+            pending.erase(0, take);
+            remaining -= take;
         }
-        resp.body.assign(pending, 0, want);
-        return true;
+        return sink.finish();
     }
 
     // No length and no chunking: read to EOF.
-    resp.body = pending;
+    if (!pending.empty()) {
+        if (!sink.append(pending.data(), pending.size())) return false;
+        pending.clear();
+    }
     while (true) {
-        char chunk[8192];
+        char chunk[64 * 1024];
         std::string err;
         ssize_t n = t.read(chunk, sizeof(chunk), err);
         if (n < 0) {
             resp.error = err;
             return false;
         }
-        if (n == 0) return true;
-        resp.body.append(chunk, static_cast<size_t>(n));
+        if (n == 0) return sink.finish();
+        if (!sink.append(chunk, static_cast<size_t>(n))) return false;
     }
 }
 
@@ -439,6 +520,24 @@ Response perform(const Request& req) {
         t = &plain;
     }
 
+    // A file body is streamed after the headers; its size is the Content-Length.
+    std::FILE* body_file = nullptr;
+    size_t body_len = req.body.size();
+    if (!req.body_path.empty()) {
+        struct stat st {};
+        if (::stat(req.body_path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+            resp.error = "body file " + req.body_path + ": " +
+                         (errno ? std::strerror(errno) : "not a regular file");
+            return resp;
+        }
+        body_file = std::fopen(req.body_path.c_str(), "rb");
+        if (!body_file) {
+            resp.error = "open(" + req.body_path + "): " + std::strerror(errno);
+            return resp;
+        }
+        body_len = static_cast<size_t>(st.st_size);
+    }
+
     std::string wire = req.method + " " + req.path + " HTTP/1.1\r\n";
     wire += "Host: " + req.host + "\r\n";
     // One request per connection: no keep-alive bookkeeping to get wrong.
@@ -448,16 +547,36 @@ Response perform(const Request& req) {
         if (util::lower(h.first) == "content-length") has_len = true;
         wire += h.first + ": " + h.second + "\r\n";
     }
-    if (!has_len && (!req.body.empty() || req.method == "POST" || req.method == "PUT"))
-        wire += "Content-Length: " + std::to_string(req.body.size()) + "\r\n";
+    if (!has_len && (body_len > 0 || req.method == "POST" || req.method == "PUT"))
+        wire += "Content-Length: " + std::to_string(body_len) + "\r\n";
     wire += "\r\n";
-    wire += req.body;
+    if (!body_file) wire += req.body;
 
-    if (!t->write(wire, resp.error)) return resp;
+    bool sent = t->write(wire, resp.error);
+    if (sent && body_file) {
+        char chunk[64 * 1024];
+        size_t n;
+        while ((n = std::fread(chunk, 1, sizeof(chunk), body_file)) > 0) {
+            if (!t->write(chunk, n, resp.error)) {
+                sent = false;
+                break;
+            }
+        }
+        if (sent && std::ferror(body_file)) {
+            resp.error = "read(" + req.body_path + "): " + std::strerror(errno);
+            sent = false;
+        }
+    }
+    if (body_file) std::fclose(body_file);
+    if (!sent) return resp;
 
     std::string pending;
     if (!read_headers(*t, pending, resp)) return resp;
-    read_body(*t, pending, resp);  // body errors are recorded in resp.error
+    // Only a 2xx body goes to the sink file: an error body is the S3 XML
+    // diagnostic and belongs in resp.body, not in the destination file.
+    const bool stream_ok = resp.status >= 200 && resp.status < 300;
+    BodySink sink(&resp, stream_ok ? req.sink_path : std::string());
+    read_body(*t, pending, resp, sink);  // body errors are recorded in resp.error
     return resp;
 }
 

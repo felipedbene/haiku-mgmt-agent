@@ -3,7 +3,9 @@
 #include <mbedtls/md.h>
 #include <mbedtls/sha256.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -13,6 +15,25 @@ namespace util {
 std::string sha256_hex(const std::string& data) {
     unsigned char out[32];
     mbedtls_sha256(reinterpret_cast<const unsigned char*>(data.data()), data.size(), out, 0);
+    return to_hex(std::string(reinterpret_cast<char*>(out), sizeof(out)));
+}
+
+std::string sha256_file_hex(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return "";
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0);
+    char buf[64 * 1024];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        mbedtls_sha256_update(&ctx, reinterpret_cast<unsigned char*>(buf), n);
+    const bool read_ok = std::feof(f) && !std::ferror(f);
+    std::fclose(f);
+    unsigned char out[32];
+    mbedtls_sha256_finish(&ctx, out);
+    mbedtls_sha256_free(&ctx);
+    if (!read_ok) return "";
     return to_hex(std::string(reinterpret_cast<char*>(out), sizeof(out)));
 }
 
@@ -198,6 +219,36 @@ std::string clip(const std::string& s, size_t max, const std::string& suffix) {
     if (s.size() <= max) return s;
     if (suffix.size() >= max) return s.substr(0, max);
     return s.substr(0, max - suffix.size()) + suffix;
+}
+
+std::string uri_encode(const std::string& s, bool encode_slash) {
+    static const char* digits = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
+        if (unreserved || (c == '/' && !encode_slash)) {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += digits[c >> 4];
+            out += digits[c & 0x0F];
+        }
+    }
+    return out;
+}
+
+int version_compare(const std::string& a, const std::string& b) {
+    std::vector<std::string> pa = split(a, '.');
+    std::vector<std::string> pb = split(b, '.');
+    const size_t n = std::max(pa.size(), pb.size());
+    for (size_t i = 0; i < n; i++) {
+        long va = i < pa.size() ? std::strtol(pa[i].c_str(), nullptr, 10) : 0;
+        long vb = i < pb.size() ? std::strtol(pb[i].c_str(), nullptr, 10) : 0;
+        if (va != vb) return va < vb ? -1 : 1;
+    }
+    return 0;
 }
 
 }  // namespace util

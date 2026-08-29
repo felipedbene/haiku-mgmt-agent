@@ -19,12 +19,22 @@ struct Request {
     std::vector<std::pair<std::string, std::string>> headers;
     std::string body;
     int timeout_ms = 25000;  // must exceed the MDS long-poll ceiling (20 s)
+
+    // Streaming, for S3-sized payloads that must not be buffered in RAM on a
+    // 4 GiB builder. When body_path is set it is streamed as the request body
+    // (Content-Length = file size; `body` must be empty). When sink_path is
+    // set, a 2xx response body is streamed to that file instead of resp.body;
+    // error bodies (non-2xx) still land in resp.body so S3's XML reason is
+    // loggable.
+    std::string body_path;
+    std::string sink_path;
 };
 
 struct Response {
     int status = 0;
     std::map<std::string, std::string> headers;  // lower-cased keys
     std::string body;
+    size_t sink_bytes = 0;  // bytes streamed to Request::sink_path, when used
     std::string error;  // non-empty => transport/TLS failure, status is 0
 
     bool ok() const { return error.empty() && status >= 200 && status < 300; }
