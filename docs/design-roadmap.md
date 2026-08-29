@@ -140,12 +140,16 @@ now cross-compiles to Haiku arm64 in this project, so it is a candidate for a **
 component (e.g. an F5 Session Manager PTY/websocket path) — never a reason to rewrite
 the working agent.
 
-**Adopt `aws-sdk-cpp` — no.** It has no haiku/arm64 build and pulls in libcurl +
-OpenSSL + CMake, which destroys the self-contained-on-a-base-image property that lets
-this run before any package is installed; a 1.1 MB binary would become tens of MB of
-dependencies to port and bake. Keep the minimal hand-rolled SigV4/HTTP core. Only
-reconsider a real SDK if the agent ever moves *off* the base-image critical path (a
-separate, richly-provisioned management box) — not for the fleet agent itself.
+**Adopt `aws-sdk-cpp` — deferred until it's a real need, not rejected outright.**
+Today it is the wrong trade: no haiku/arm64 build, and it pulls in libcurl + OpenSSL +
+CMake, which destroys the self-contained-on-a-base-image property that lets this run
+before any package is installed — a 1.1 MB binary would become tens of MB of
+dependencies to port and bake. So we keep the minimal hand-rolled SigV4/HTTP core *for
+now*. Revisit only when a concrete need forces it — e.g. the agent moves off the
+base-image critical path (a separate, richly-provisioned management box), or a feature
+needs enough new AWS surface (many services/operations) that hand-rolling each call
+costs more than porting the SDK once. Decision: **wait for that trigger; do not adopt
+speculatively.**
 
 ## 4. Build & package quick-ref
 - Native build on a canonical arm64 box: install toolchain via DeBeOS repo
