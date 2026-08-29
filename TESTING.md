@@ -7,17 +7,22 @@ including the new S3 request-shape, URI-encoding, version-compare,
 cancellation, full-capture and streamed-sha256 tests; `main`, `selfupdate`
 and `timesync` compile warning-free.
 
-**Exercised live on Haiku hardware:** pending. The Phase-2 gates, in order:
+**Exercised live on Haiku hardware (2026-08-29, node i-01fe92119d18f09c8,
+hrev59996 arm64):** all Phase-2 gates PASS.
 
-1. `s3 cp` a multi-hundred-MiB object down and an hpkg up on a running-agent
-   instance; checksums round-trip (F1 gate, design-roadmap §F1).
-2. `send-command --output-s3-bucket-name …` over a 5000-line output → all lines
-   retrievable from S3, inline reply carries the S3 location (F2 gate).
-3. `cancel-command` against a long `sleep` → command reports `Cancelled`,
-   process group gone on-instance.
-4. Publish a v-next manifest → a running agent installs the hpkg via pkgman,
-   restarts, and `describe-instance-information` reports the new AgentVersion
-   (F3 gate).
+| Gate | Result |
+|---|---|
+| F1 S3 round-trip, 64 MiB (`s3 cp` up then down) | PASS — 82/71 MiB/s, sha256 identical |
+| F1 large transfer, 512 MiB | PASS — 107/41 MiB/s, sha256 identical, no OOM (streamed) |
+| F2 S3 output, 5000-line log | PASS — full log in S3 at the standard SSM key layout; inline clipped as designed |
+| CancelCommand | PASS — reports `Cancelled`, `sleep` killed, post-sleep line never ran |
+| Concurrency, 4 workers | PASS — ran in parallel (~4 s window), poll loop not blocked |
+| Rapid-fire, 12 back-to-back | PASS — 12/12, dedup + poll loop stable |
+| F3 self-update 0.2.0 → 0.2.1 | PASS — manifest → sha256 verify → pkgman install → launch_roster restart; `describe-instance-information` then reports AgentVersion 0.2.1 |
+
+Test fixtures were in a scoped account/bucket with a least-privilege role
+(`s3:GetObject`/`PutObject`/`ListBucket` on the one bucket); the agent used the
+instance role via IMDS for all S3 calls.
 
 # Phase 1
 
