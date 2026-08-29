@@ -282,22 +282,34 @@ void run_session(const Options& opts, const StartRequest& sr) {
     int64_t next_expected = 0;  // ExpectedSequenceNumber for inbound stream data
     bool running = true;
     while (running && (!opts.stop || !opts.stop->load())) {
-        // 1. Drain any pty output to the customer.
-        char buf[kPtyReadChunk];
-        ssize_t n = ::read(pty.master, buf, sizeof(buf));
-        if (n > 0) {
-            std::string derr;
-            if (!send_stream(ws, mgs::kPayloadOutput, std::string(buf, static_cast<size_t>(n)),
-                             out_seq, derr)) {
-                logging::logf(logging::Warn, "session %s: output send failed: %s",
-                              sr.session_id.c_str(), derr.c_str());
-                break;
+        // 1. Drain all currently-available pty output to the customer, so a
+        //    chatty command is not throttled to one chunk per recv timeout.
+        bool sent_output = false;
+        while (true) {
+            char buf[kPtyReadChunk];
+            ssize_t n = ::read(pty.master, buf, sizeof(buf));
+            if (n > 0) {
+                sent_output = true;
+                std::string derr;
+                if (!send_stream(ws, mgs::kPayloadOutput,
+                                 std::string(buf, static_cast<size_t>(n)), out_seq, derr)) {
+                    logging::logf(logging::Warn, "session %s: output send failed: %s",
+                                  sr.session_id.c_str(), derr.c_str());
+                    running = false;
+                }
+                continue;
             }
-        } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
-            running = false;  // shell exited or pty error
+            if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+                running = false;  // shell exited or pty error
+            break;  // no more data ready right now
         }
+        if (!running) break;
 
-        // 2. Handle one inbound frame (bounded by the short data-channel timeout).
+        // 2. Handle one inbound frame (bounded by the short data-channel
+        //    timeout). Skip the wait when we just flushed output so keystroke
+        //    echo stays responsive during heavy output.
+        if (sent_output) ws.set_recv_timeout(1);
+        else ws.set_recv_timeout(kDataRecvPollMs);
         ws::Frame f;
         int rc = ws.recv(f, err);
         if (rc < 0) {
@@ -532,6 +544,15 @@ bool run(const Options& opts) {
                 logging::logf(logging::Warn,
                               "session %s: unsupported session type '%s' on Haiku; ignoring",
                               sr.session_id.c_str(), sr.session_type.c_str());
+                continue;
+            }
+            // Refuse rather than silently downgrade: KMS session encryption is
+            // not implemented, so a session that asked for it must not run in
+            // plaintext (that would be a security regression, not a feature gap).
+            if (!sr.kms_key_id.empty()) {
+                logging::logf(logging::Warn,
+                              "session %s: KMS encryption requested but unsupported; refusing",
+                              sr.session_id.c_str());
                 continue;
             }
             std::thread(run_session, opts, sr).detach();
