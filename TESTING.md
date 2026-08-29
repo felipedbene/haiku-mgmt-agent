@@ -1,4 +1,25 @@
-# Testing — haiku-mgmt-agent Phase 1
+# Testing — haiku-mgmt-agent
+
+## Phase 2 (v0.2.0) verification state
+
+**Date:** 2026-08-29. Host-side: 100/100 unit checks pass (`make check`),
+including the new S3 request-shape, URI-encoding, version-compare,
+cancellation, full-capture and streamed-sha256 tests; `main`, `selfupdate`
+and `timesync` compile warning-free.
+
+**Exercised live on Haiku hardware:** pending. The Phase-2 gates, in order:
+
+1. `s3 cp` a multi-hundred-MiB object down and an hpkg up on a running-agent
+   instance; checksums round-trip (F1 gate, design-roadmap §F1).
+2. `send-command --output-s3-bucket-name …` over a 5000-line output → all lines
+   retrievable from S3, inline reply carries the S3 location (F2 gate).
+3. `cancel-command` against a long `sleep` → command reports `Cancelled`,
+   process group gone on-instance.
+4. Publish a v-next manifest → a running agent installs the hpkg via pkgman,
+   restarts, and `describe-instance-information` reports the new AgentVersion
+   (F3 gate).
+
+# Phase 1
 
 **Date:** 2026-08-21
 **Target:** `i-046a6d266c6c63e83`, t4g.medium, `ami-0c17f56477d32638f`

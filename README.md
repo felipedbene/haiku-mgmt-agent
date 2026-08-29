@@ -8,7 +8,26 @@ console or CLI.
 Companion to [`haiku-graviton`](https://github.com/felipedbene/Haiku-Graviton) and
 [`haiku-on-ec2`](https://github.com/felipedbene/haiku-on-ec2).
 
-## Status: Phase 1 MVP working
+## Status: Phase 2 — fleet features on top of the proven Phase 1 MVP
+
+Phase 2 (this tree, v0.2.0) adds, per [`docs/design-roadmap.md`](docs/design-roadmap.md):
+
+- **F1 — native S3 transfer**: `haiku-mgmt-agent s3 cp <local> s3://bkt/key` (and
+  the reverse) with SigV4 `UNSIGNED-PAYLOAD` signing over the existing TLS stack,
+  streaming both directions so a 400 MiB artifact never sits in RAM. Kills the
+  scp publish-bridge and the wget source-seed shim.
+- **F2 — S3 command output**: `send-command --output-s3-bucket-name ...` uploads the
+  *full* stdout/stderr (up to 8 MiB per stream) to the standard SSM S3 layout and
+  reports the location in the reply; inline output stays as the clipped fallback.
+- **F3 — self-update**: `--update-manifest s3://...` polls a version manifest hourly
+  and installs a strictly-newer `.hpkg` via `pkgman` (the running binary lives on
+  read-only packagefs, so the update *is* a package operation), then restarts the
+  service through `launch_roster`. Also available on demand: `haiku-mgmt-agent
+  self-update --manifest URI [--restart]`.
+- **CancelCommand actually cancels**: commands now run on worker threads; a cancel
+  kills the whole process group (SIGTERM, then SIGKILL) and reports `Cancelled`.
+
+## Status: Phase 1 MVP working (hardware-verified)
 
 ```
 $ aws ssm describe-instance-information --region us-west-2
@@ -53,8 +72,13 @@ The whole thing is one 1.35 MB binary whose only runtime dependencies are
 `FailMessage`), `aws:runShellScript` via `/bin/sh -c`, inline output, per-command
 timeouts, dedup by CommandId, health ping, launch_daemon integration.
 
+**In (Phase 2):** native S3 GET/PUT (`s3 cp`), `OutputS3BucketName`/
+`OutputS3KeyPrefix` command output, manifest-driven self-update, real
+CancelCommand (worker-thread execution + process-group kill), credential
+refresh-and-retry on expired-token rejections mid-transfer.
+
 **Out, deliberately:** MGS/`ssmmessages` in any form, Session Manager, inventory,
-self-update, S3/CloudWatch output. Anything other than `aws:runShellScript`
+CloudWatch output. Anything other than `aws:runShellScript`
 returns a terminal `Failed` explaining it is unsupported — never a silent skip,
 which matters because DHMC pushes association documents at instances regardless.
 

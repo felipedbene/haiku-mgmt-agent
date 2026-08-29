@@ -3,14 +3,19 @@
 // Deliberately dependency-free: no gtest on the build host, and certainly none
 // on the target. Run with `make check`.
 
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
 #include "aws.h"
+#include "exec.h"
 #include "json.h"
 #include "log.h"
 #include "runner.h"
+#include "s3.h"
 #include "util.h"
 
 namespace {
@@ -241,6 +246,136 @@ void test_time_formats() {
     check(util::parse_http_date("garbage") == 0, "unparseable date reports 0");
 }
 
+void test_uri_encode() {
+    std::printf("uri encode\n");
+    check_eq(util::uri_encode("abc-123_~.txt", false), "abc-123_~.txt", "unreserved untouched");
+    check_eq(util::uri_encode("a b+c", false), "a%20b%2Bc", "space and plus escaped");
+    check_eq(util::uri_encode("path/to/key", false), "path/to/key", "slash kept in paths");
+    check_eq(util::uri_encode("path/to/key", true), "path%2Fto%2Fkey", "slash escaped in query");
+    check_eq(util::uri_encode("\xc3\xa9", false), "%C3%A9", "utf-8 bytes escaped uppercase");
+}
+
+void test_version_compare() {
+    std::printf("version compare\n");
+    check(util::version_compare("0.1.0", "0.2.0") < 0, "0.1.0 < 0.2.0");
+    check(util::version_compare("0.2.0", "0.2.0") == 0, "equal versions");
+    check(util::version_compare("0.10.0", "0.9.9") > 0, "numeric, not lexicographic");
+    check(util::version_compare("1.0", "1.0.0") == 0, "missing component is 0");
+    check(util::version_compare("garbage", "0.0.1") < 0, "malformed never looks newer");
+}
+
+void test_s3_uri() {
+    std::printf("s3 uri parsing\n");
+    std::string b, k;
+    check(s3::parse_uri("s3://bkt/some/key.tar", b, k), "well-formed uri accepted");
+    check_eq(b, "bkt", "bucket extracted");
+    check_eq(k, "some/key.tar", "key extracted");
+    check(!s3::parse_uri("s3://bkt", b, k), "bucket-only rejected");
+    check(!s3::parse_uri("s3://bkt/", b, k), "empty key rejected");
+    check(!s3::parse_uri("http://bkt/key", b, k), "wrong scheme rejected");
+    check(!s3::parse_uri("s3:///key", b, k), "empty bucket rejected");
+}
+
+void test_s3_request_shape() {
+    std::printf("s3 request shape\n");
+    aws::Credentials creds;
+    creds.access_key = "AKIAEXAMPLE";
+    creds.secret_key = "secret";
+    creds.token = "TOKEN";
+    // Fixed time so the request is deterministic.
+    http::Request r = s3::build_request("PUT", "us-west-2", creds, "bkt", "a dir/file.hpkg",
+                                        1787229296, "application/octet-stream");
+    check_eq(r.host, "bkt.s3.us-west-2.amazonaws.com", "virtual-hosted host");
+    check_eq(r.path, "/a%20dir/file.hpkg", "key encoded, slash preserved");
+    std::string auth, content_sha, token;
+    for (const auto& h : r.headers) {
+        if (h.first == "Authorization") auth = h.second;
+        if (h.first == "X-Amz-Content-Sha256") content_sha = h.second;
+        if (h.first == "X-Amz-Security-Token") token = h.second;
+    }
+    check_eq(content_sha, "UNSIGNED-PAYLOAD", "unsigned payload declared");
+    check_eq(token, "TOKEN", "session token attached");
+    check(auth.find("Credential=AKIAEXAMPLE/20260820/us-west-2/s3/aws4_request") != std::string::npos,
+          "scope names the s3 service and the datestamp");
+    check(auth.find("SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token") !=
+              std::string::npos,
+          "signed header list sorted and complete");
+    check(auth.find("Signature=") != std::string::npos && auth.size() > auth.find("Signature=") + 64,
+          "signature present and hex-sized");
+
+    // Same inputs, same signature: the signing path is deterministic.
+    http::Request r2 = s3::build_request("PUT", "us-west-2", creds, "bkt", "a dir/file.hpkg",
+                                         1787229296, "application/octet-stream");
+    std::string auth2;
+    for (const auto& h : r2.headers)
+        if (h.first == "Authorization") auth2 = h.second;
+    check_eq(auth2, auth, "deterministic signature");
+}
+
+void test_cancellation() {
+    std::printf("cancellation\n");
+    exec::Cancel cancel;
+    std::thread canceller([&cancel]() {
+        ::usleep(300 * 1000);
+        cancel.request();
+    });
+    int64_t began = util::now_epoch_ms();
+    exec::Result r = exec::run_shell("sleep 30", 60, "", 4096, &cancel);
+    int64_t took = util::now_epoch_ms() - began;
+    canceller.join();
+    check(r.cancelled, "result marked cancelled");
+    check(!r.timed_out, "cancel is not a timeout");
+    check(took < 15000, "cancel lands promptly (took " + std::to_string(took) + "ms)");
+
+    // Cancelled step surfaces as a Cancelled document.
+    std::string err;
+    json::Value doc = json::parse(
+        R"({"schemaVersion":"2.2","mainSteps":[{"action":"aws:runShellScript","name":"runShellScript",
+            "inputs":{"runCommand":["sleep 30"]}}]})", &err);
+    exec::Cancel cancel2;
+    cancel2.request();  // pre-cancelled: fires on the first poll interval
+    runner::Options opts;
+    opts.cancel = &cancel2;
+    runner::DocumentOutcome out = runner::run_document(doc, json::Value(), opts);
+    check_eq(out.status, "Cancelled", "document status Cancelled");
+    check(out.steps.size() == 1 && out.steps[0].status == "Cancelled", "step status Cancelled");
+}
+
+void test_full_capture() {
+    std::printf("full capture for S3 output\n");
+    std::string err;
+    json::Value doc = json::parse(
+        R"({"schemaVersion":"2.2","mainSteps":[{"action":"aws:runShellScript","name":"runShellScript",
+            "inputs":{"runCommand":["i=0; while [ $i -lt 3000 ]; do echo line $i; i=$((i+1)); done"]}}]})",
+        &err);
+    runner::Options opts;
+    opts.max_capture = 1024 * 1024;
+    runner::DocumentOutcome out = runner::run_document(doc, json::Value(), opts);
+    check_eq(out.status, "Success", "long output command succeeds");
+    if (out.steps.size() == 1) {
+        check(out.steps[0].full_stdout.find("line 2999") != std::string::npos,
+              "full capture holds the last line");
+        check(out.steps[0].standard_output.size() <= 24000, "inline stdout still clipped");
+        check(out.steps[0].full_stdout.size() > out.steps[0].standard_output.size(),
+              "full capture exceeds the inline clip");
+    }
+}
+
+void test_sha256_file() {
+    std::printf("sha256 of a file\n");
+    const char* path = "/tmp/haiku-mgmt-agent-test-sha";
+    std::FILE* f = std::fopen(path, "wb");
+    if (f) {
+        std::fwrite("abc", 1, 3, f);
+        std::fclose(f);
+    }
+    check_eq(util::sha256_file_hex(path),
+             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+             "streamed digest matches the string digest");
+    check_eq(util::sha256_file_hex("/nonexistent/nope"), "", "missing file reports empty");
+    ::remove(path);
+}
+
 }  // namespace
 
 int main() {
@@ -256,6 +391,13 @@ int main() {
     test_message_id_parsing();
     test_uuid();
     test_time_formats();
+    test_uri_encode();
+    test_version_compare();
+    test_s3_uri();
+    test_s3_request_shape();
+    test_cancellation();
+    test_full_capture();
+    test_sha256_file();
 
     std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
