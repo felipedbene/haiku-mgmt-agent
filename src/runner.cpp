@@ -1,6 +1,7 @@
 #include "runner.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 #include <map>
 
@@ -162,7 +163,8 @@ json::Value resolve(const json::Value& node, const json::Value& parameters,
     return walk(node);
 }
 
-DocumentOutcome run_document(const json::Value& document_content, const json::Value& parameters) {
+DocumentOutcome run_document(const json::Value& document_content, const json::Value& parameters,
+                             const Options& options) {
     DocumentOutcome outcome;
     outcome.status = "Success";
 
@@ -245,7 +247,8 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
         logging::logf(logging::Info, "running step %s (%s), timeout=%ds, %zu line(s)",
                       st.plugin_id.c_str(), st.action.c_str(), timeout, lines.size());
 
-        exec::Result er = exec::run_shell(script, timeout, workdir, kMaxStdoutLength);
+        const size_t capture = std::max(options.max_capture, kMaxStdoutLength);
+        exec::Result er = exec::run_shell(script, timeout, workdir, capture, options.cancel);
 
         StepResult sr;
         sr.plugin_id = st.plugin_id;
@@ -254,9 +257,14 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
         sr.end_time = util::iso8601(util::now_epoch_ms());
         sr.standard_output = util::clip(er.stdout_data, kMaxStdoutLength);
         sr.standard_error = util::clip(er.stderr_data, kMaxStdoutLength);
+        sr.full_stdout = std::move(er.stdout_data);
+        sr.full_stderr = std::move(er.stderr_data);
         sr.code = er.exit_code;
 
-        if (!er.error.empty()) {
+        if (er.cancelled) {
+            sr.status = "Cancelled";
+            if (sr.code == 0) sr.code = 1;
+        } else if (!er.error.empty()) {
             sr.status = "Failed";
             sr.standard_error += (sr.standard_error.empty() ? "" : "\n") + er.error;
             if (sr.code == 0) sr.code = 1;
@@ -268,8 +276,15 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
         }
 
         sr.output = truncate_output(sr.standard_output, sr.standard_error, kMaxPluginOutputSize);
-        if (sr.status != "Success") outcome.status = "Failed";
+        if (sr.status == "Cancelled")
+            outcome.status = "Cancelled";
+        else if (sr.status != "Success" && outcome.status != "Cancelled")
+            outcome.status = "Failed";
         outcome.steps.push_back(sr);
+
+        // A cancelled document stops here: running the remaining steps after
+        // the user asked for a stop would be worse than skipping them.
+        if (er.cancelled) break;
 
         logging::logf(logging::Info, "step %s finished: status=%s code=%d stdout=%zuB stderr=%zuB",
                       sr.plugin_id.c_str(), sr.status.c_str(), sr.code, sr.standard_output.size(),
@@ -312,8 +327,8 @@ std::string reply_payload(const AgentInfo& agent, const std::string& document_st
         st.object["output"] = json::str(s.output);
         st.object["startDateTime"] = json::str(s.start_time);
         st.object["endDateTime"] = json::str(s.end_time);
-        st.object["outputS3BucketName"] = json::str("");
-        st.object["outputS3KeyPrefix"] = json::str("");
+        st.object["outputS3BucketName"] = json::str(s.output_s3_bucket);
+        st.object["outputS3KeyPrefix"] = json::str(s.output_s3_key_prefix);
         st.object["stepName"] = json::str(s.plugin_id);
         st.object["standardOutput"] = json::str(s.standard_output);
         st.object["standardError"] = json::str(s.standard_error);

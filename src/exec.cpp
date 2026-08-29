@@ -22,7 +22,7 @@ constexpr int kGraceSeconds = 5;              // SIGTERM -> SIGKILL window
 }  // namespace
 
 Result run_shell(const std::string& script, int timeout_seconds, const std::string& working_dir,
-                 size_t max_capture_bytes) {
+                 size_t max_capture_bytes, Cancel* cancel) {
     Result r;
     if (timeout_seconds <= 0) timeout_seconds = kDefaultTimeoutSeconds;
 
@@ -130,8 +130,10 @@ Result run_shell(const std::string& script, int timeout_seconds, const std::stri
         }
 
         now = util::now_epoch_ms();
-        if (!killed_term && now >= deadline_ms) {
-            r.timed_out = true;
+        const bool cancel_now = cancel && cancel->requested.load() && !killed_term;
+        if (cancel_now || (!killed_term && now >= deadline_ms)) {
+            if (cancel_now) r.cancelled = true;
+            else r.timed_out = true;
             killed_term = true;
             kill_deadline_ms = now + kGraceSeconds * 1000;
             // Negative pid => whole process group, i.e. the shell and its children.
@@ -139,8 +141,10 @@ Result run_shell(const std::string& script, int timeout_seconds, const std::stri
                 logging::logf(logging::Warn, "SIGTERM to process group %d failed: %s", static_cast<int>(pid),
                               std::strerror(errno));
             else
-                logging::logf(logging::Warn, "command exceeded %ds; sent SIGTERM to process group %d",
-                              timeout_seconds, static_cast<int>(pid));
+                logging::logf(logging::Warn, "%s; sent SIGTERM to process group %d",
+                              cancel_now ? "command cancelled"
+                                         : "command exceeded its timeout",
+                              static_cast<int>(pid));
         } else if (killed_term && !killed_kill && now >= kill_deadline_ms) {
             killed_kill = true;
             if (::kill(-pid, SIGKILL) != 0)
