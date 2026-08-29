@@ -14,16 +14,20 @@ stripped arm64 binary; `NEEDED` = `libnetwork`, `libstdc++`, `libgcc_s`, `libroo
 (all in the canonical AMI base → `requires { haiku }`).
 
 **Why it's non-trivial (and the constraints that shape all features):** haiku/arm64
-historically had no OpenSSL, no HTTPS curl, no compiler, no package repo. The agent
-therefore is fully self-contained:
+historically had no OpenSSL, no HTTPS curl, no compiler, no package repo. That is
+dated: the DeBeOS CDN repo now vends OpenSSL/curl/toolchain/Rust, and DeBeOS images
+seed the RTC from EFI GetTime() (no more 1970 boot). The agent stays fully
+self-contained anyway — it must work on a fresh *base* image before any package can
+be installed, and stock upstream images still have the old gaps:
 - **Own TLS** — mbedTLS 3.6.2, static (`tools/build-mbedtls.sh`; builds natively now,
   the Makefile's cross-only assumption is stale).
 - **Own HTTP/1.1 client** — `src/http.cpp` (no libcurl).
 - **Own SigV4 + JSON** — `src/aws.cpp`, `src/json.cpp` (no aws-sdk, no jq).
 - **Own trust anchors** — `src/ca_certs.h` (`tools/gen-ca-certs.sh`).
-- **Clock fix** — `src/timesync.cpp` sets the clock from IMDS's HTTP `Date` header,
-  because Haiku on EC2 boots at 1970 with no NTP → otherwise TLS *and* SigV4 fail.
-  **Ordering rule: fix the clock before any TLS/SigV4 call.**
+- **Clock guard** — `src/timesync.cpp` sets the clock from IMDS's HTTP `Date` header.
+  DeBeOS images seed the RTC from EFI GetTime() now, so this is a guard (drift, stock
+  upstream images) rather than the boot-blocker it was — but with no NTP client on
+  the platform it stays. **Ordering rule: check the clock before any TLS/SigV4 call.**
 
 **Source map:** `src/{main,runner,exec,aws,json,http,timesync,util,log,ca_certs}.{cpp,h}`;
 `tools/{stage-sysroot,gen-ca-certs,build-mbedtls}.sh`; `spike/sigv4-post.sh`;

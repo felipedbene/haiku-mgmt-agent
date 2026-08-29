@@ -51,17 +51,26 @@ is deliberate — see `docs/BRIEF.md` §9.2.
 
 ## What made this non-trivial
 
-haiku/arm64 has **no OpenSSL, no HTTPS-capable curl, no compiler, and no package
-repository at all** (HaikuPorts publishes `["riscv64", "x86_64", "x86_gcc2"]`).
-The agent therefore:
+At Phase-1 time, haiku/arm64 had **no OpenSSL, no HTTPS-capable curl, no
+compiler, and no package repository at all** (HaikuPorts publishes
+`["riscv64", "x86_64", "x86_gcc2"]`). The DeBeOS project has since closed much
+of that gap — its own CDN package repository now vends OpenSSL, curl, a native
+toolchain and Rust, and DeBeOS images seed the RTC from EFI `GetTime()` so the
+clock no longer boots at 1970. The agent nevertheless **stays self-contained on
+purpose**: it is the first thing that must work on a freshly booted *base*
+image (it is how the instance becomes manageable at all), so it cannot assume
+any package beyond the base set, and it still guards the clock for stock
+upstream images and for drift (there is still no NTP client). The agent:
 
 - **carries its own TLS**: mbedTLS 3.6.2, cross-compiled and statically linked
 - **implements its own HTTP/1.1 client** (`src/http.cpp`) instead of libcurl
 - **implements SigV4 and JSON from scratch** (`src/aws.cpp`, `src/json.cpp`) —
   there is no jq and no JSON library to link
 - **ships its own trust anchors** (`src/ca_certs.h`) — there is no system CA store
-- **fixes the system clock** from IMDS's HTTP `Date` header, because Haiku on EC2
-  boots at 1970-01-01 with no NTP client, which otherwise breaks TLS *and* SigV4
+- **guards the system clock** from IMDS's HTTP `Date` header. On stock upstream
+  images Haiku on EC2 boots at 1970-01-01 (which breaks TLS *and* SigV4); DeBeOS
+  images now seed the RTC from EFI `GetTime()`, but there is still no NTP
+  client, so the agent corrects any drift beyond 60 s either way
 
 The whole thing is one 1.35 MB binary whose only runtime dependencies are
 `libroot`, `libnetwork` and `libstdc++`, all present on the canonical AMI.
