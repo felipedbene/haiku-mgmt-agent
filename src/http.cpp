@@ -213,7 +213,7 @@ struct TlsTransport : Transport {
 
     bool handshake(Socket* sock, const std::string& host, std::string& err) {
         int rc = mbedtls_ctr_drbg_seed(&drbg, urandom_entropy, nullptr,
-                                       reinterpret_cast<const unsigned char*>("haiku-mgmt-agent"), 16);
+                                       reinterpret_cast<const unsigned char*>("debeos-ssm-agent"), 16);
         if (rc != 0) {
             err = "ctr_drbg_seed: " + mbed_err(rc);
             return false;

@@ -233,7 +233,7 @@ http::Response call(const std::string& service, const std::string& target_prefix
     req.headers.push_back({"Authorization",
                            "AWS4-HMAC-SHA256 Credential=" + creds.access_key + "/" + scope +
                                ", SignedHeaders=" + signed_names + ", Signature=" + signature});
-    req.headers.push_back({"User-Agent", "haiku-mgmt-agent"});
+    req.headers.push_back({"User-Agent", "debeos-ssm-agent"});
 
     return http::perform(req);
 }

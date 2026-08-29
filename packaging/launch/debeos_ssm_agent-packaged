@@ -1,9 +1,9 @@
-# launch_daemon job for the *packaged* haiku-mgmt-agent. Ships inside the hpkg
-# as data/launch/haiku-mgmt-agent, so packagefs exposes it at
-# /boot/system/data/launch/haiku-mgmt-agent and launch_daemon starts the agent
+# launch_daemon job for the *packaged* debeos-ssm-agent. Ships inside the hpkg
+# as data/launch/debeos-ssm-agent, so packagefs exposes it at
+# /boot/system/data/launch/debeos-ssm-agent and launch_daemon starts the agent
 # on every boot -- this is the self-register path the AMI bake relies on (F4).
 #
-# The sibling file `haiku-mgmt-agent` is the same job for a manual
+# The sibling file `debeos-ssm-agent` is the same job for a manual
 # non-packaged install (/boot/system/non-packaged/bin + settings/launch); its
 # header comments explain the service/legacy/no-network-condition choices,
 # which apply here unchanged.
@@ -12,7 +12,7 @@
 #   --update-manifest s3://<bucket>/<key>
 # The manifest must name a strictly newer version; see docs/design-roadmap.md.
 
-service x-vnd.haiku-mgmt-agent {
-	launch /boot/system/bin/haiku-mgmt-agent
+service x-vnd.debeos-ssm-agent {
+	launch /boot/system/bin/debeos-ssm-agent
 	legacy
 }

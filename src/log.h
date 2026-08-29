@@ -1,4 +1,4 @@
-// log.h -- thread-safe line logger to /var/log/haiku-mgmt-agent.log (BRIEF.md 5).
+// log.h -- thread-safe line logger to /var/log/debeos-ssm-agent.log (BRIEF.md 5).
 #pragma once
 
 #include <string>

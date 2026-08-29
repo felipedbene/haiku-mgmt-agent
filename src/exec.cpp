@@ -68,13 +68,13 @@ Result run_shell(const std::string& script, int timeout_seconds, const std::stri
         }
 
         if (!working_dir.empty() && ::chdir(working_dir.c_str()) != 0) {
-            std::string msg = "haiku-mgmt-agent: chdir(" + working_dir + ") failed: " + std::strerror(errno) + "\n";
+            std::string msg = "debeos-ssm-agent: chdir(" + working_dir + ") failed: " + std::strerror(errno) + "\n";
             ::write(STDERR_FILENO, msg.data(), msg.size());
             ::_exit(127);
         }
 
         ::execl("/bin/sh", "sh", "-c", script.c_str(), static_cast<char*>(nullptr));
-        std::string msg = std::string("haiku-mgmt-agent: exec /bin/sh failed: ") + std::strerror(errno) + "\n";
+        std::string msg = std::string("debeos-ssm-agent: exec /bin/sh failed: ") + std::strerror(errno) + "\n";
         ::write(STDERR_FILENO, msg.data(), msg.size());
         ::_exit(127);
     }

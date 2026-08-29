@@ -1,5 +1,5 @@
-# launch_daemon job for haiku-mgmt-agent. Installed as
-# /boot/system/settings/launch/haiku-mgmt-agent, which the *system*
+# launch_daemon job for debeos-ssm-agent. Installed as
+# /boot/system/settings/launch/debeos-ssm-agent, which the *system*
 # launch_daemon reads (B_FIND_PATH_SETTINGS_DIRECTORY + "launch",
 # B_FIND_PATHS_SYSTEM_ONLY). Same placement and reasoning as the sshd and
 # cloud_init_lite jobs already on the Stage A AMI:
@@ -22,7 +22,7 @@
 # which breaks TLS for everything else on the box until the agent corrects it
 # (see TESTING.md).
 
-service x-vnd.haiku-mgmt-agent {
-	launch /boot/system/non-packaged/bin/haiku-mgmt-agent
+service x-vnd.debeos-ssm-agent {
+	launch /boot/system/non-packaged/bin/debeos-ssm-agent
 	legacy
 }

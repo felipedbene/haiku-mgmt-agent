@@ -106,7 +106,7 @@ http::Request build_request(const std::string& method, const std::string& region
     req.headers.push_back({"Authorization",
                            "AWS4-HMAC-SHA256 Credential=" + creds.access_key + "/" + scope +
                                ", SignedHeaders=" + signed_names + ", Signature=" + signature});
-    req.headers.push_back({"User-Agent", "haiku-mgmt-agent"});
+    req.headers.push_back({"User-Agent", "debeos-ssm-agent"});
     return req;
 }
 

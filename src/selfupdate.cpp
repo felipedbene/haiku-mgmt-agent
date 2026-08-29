@@ -16,7 +16,7 @@
 namespace selfupdate {
 namespace {
 
-const char* kWorkDir = "/tmp/haiku-mgmt-agent-update";
+const char* kWorkDir = "/tmp/debeos-ssm-agent-update";
 
 // Fetch a small https:// resource into memory (manifests on the DeBeOS CDN).
 bool https_get(const std::string& url, std::string& body, std::string& err) {

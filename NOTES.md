@@ -1,4 +1,4 @@
-# Spike Notes — haiku-mgmt-agent Phase 1
+# Spike Notes — debeos-ssm-agent Phase 1
 
 **Date:** 2026-08-20
 **Design doc:** [`docs/BRIEF.md`](docs/BRIEF.md) (§9 = MDS wire protocol findings)
@@ -141,7 +141,7 @@ carries forward unchanged.
 Sending the exact Stage 1 payload from the laptop, with the correct `InstanceId`:
 
 ```json
-{"InstanceId":"i-046a6d266c6c63e83","AgentName":"haiku-mgmt-agent","AgentVersion":"0.1.0",
+{"InstanceId":"i-046a6d266c6c63e83","AgentName":"debeos-ssm-agent","AgentVersion":"0.1.0",
  "AgentStatus":"Active","PlatformType":"Linux","PlatformName":"Haiku",
  "PlatformVersion":"hrev59996","SSMConnectionChannel":"ec2messages",
  "IPAddress":"10.42.0.85","ComputerName":"ip-10-42-0-85.us-west-2.compute.internal",
@@ -207,7 +207,7 @@ zero new code on Haiku. Haiku never becomes a managed node, so it does not produ
 BRIEF §6 wants — but it is the honest fallback while A or B is decided.
 
 Recommendation: **B for this project, A as the more valuable contribution.** B is the shortest
-path to a working `haiku-mgmt-agent` and keeps the blast radius inside one binary; A is worth
+path to a working `debeos-ssm-agent` and keeps the blast radius inside one binary; A is worth
 more to the wider Haiku/arm64 effort and would be the right call if the OpenSSH RSA win and
 other ports matter. Either way it is a **Phase 0.5** with its own scope, not a footnote in
 Stage 2 — and C is worth doing regardless, since it is nearly free.
@@ -251,7 +251,7 @@ Dedicated per the "don't share the box" decision — the ENA/builder instance
 |---|---|---|
 | IAM role + instance profile | `haiku-mgmt-spike` | `AmazonSSMManagedInstanceCore` only |
 | EC2 key pair | `haiku-mgmt-spike` | imported from `~/.ssh/haiku-graviton-ed25519.pub` |
-| Instance | `i-046a6d266c6c63e83` | t4g.medium, `haiku-mgmt-agent-dev`, tagged `Project=haiku-graviton` |
+| Instance | `i-046a6d266c6c63e83` | t4g.medium, `debeos-ssm-agent-dev`, tagged `Project=haiku-graviton` |
 
 **Cost note:** the t4g.medium is still running (~$0.034/h) and is useless until a TLS decision
 lands. Stop or terminate it; the canonical AMI relaunches an equivalent in ~20 seconds and SSH

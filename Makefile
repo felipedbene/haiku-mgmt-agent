@@ -1,11 +1,11 @@
-# haiku-mgmt-agent -- cross-build for haiku/arm64.
+# debeos-ssm-agent -- cross-build for haiku/arm64.
 #
 # There is no native toolchain on the target (NOTES.md 1: no gcc, no package
 # repository), so this always cross-compiles. Build host prerequisites:
 #   1. tools/stage-sysroot.sh   (Haiku headers + libs for the cross-tools)
 #   2. tools/build-mbedtls.sh   (static TLS, since haiku/arm64 has no OpenSSL)
 #
-# Usage:  make            -- cross-build build/haiku-mgmt-agent
+# Usage:  make            -- cross-build build/debeos-ssm-agent
 #         make check      -- host-build and run the unit tests (needs host mbedTLS)
 #         make clean
 
@@ -21,7 +21,7 @@ SRC         := src/json.cpp src/util.cpp src/log.cpp src/http.cpp src/aws.cpp \
                src/s3.cpp src/selfupdate.cpp \
                src/exec.cpp src/runner.cpp src/timesync.cpp src/main.cpp
 OBJ         := $(patsubst src/%.cpp,build/%.o,$(SRC))
-BIN         := build/haiku-mgmt-agent
+BIN         := build/debeos-ssm-agent
 
 CXXFLAGS    ?= -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter
 CXXFLAGS    += -I$(MBEDTLS)/include -Isrc

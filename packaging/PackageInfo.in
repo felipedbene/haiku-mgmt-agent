@@ -1,20 +1,21 @@
-name			haiku_mgmt_agent
+name			debeos_ssm_agent
 version			@VERSION@
 architecture		@ARCH@
-summary			"SSM-compatible management agent for Haiku on EC2"
-description		"Native AWS Systems Manager agent for Haiku on EC2 Graviton.
-The instance registers as an SSM managed node and runs AWS-RunShellScript
-documents; the agent also provides native S3 transfer (s3 cp), S3 command
-output, self-update, and command cancellation. Self-contained: static mbedTLS,
-own HTTP/SigV4/JSON, bundled trust anchors." ;
+summary			"Independent, unofficial SSM-compatible agent for DeBeOS on EC2 Graviton (arm64)"
+description		"Independent, unofficial SSM-compatible agent for DeBeOS on EC2
+Graviton (arm64). Not affiliated with or endorsed by AWS and NOT AWS's official
+SSM agent. The instance registers as a Systems Manager managed node and runs
+AWS-RunShellScript documents; the agent also provides native S3 transfer
+(s3 cp), S3 command output, self-update, and command cancellation.
+Self-contained: static mbedTLS, own HTTP/SigV4/JSON, bundled trust anchors." ;
 vendor			"DeBeOS"
 packager		"DeBeOS <https://github.com/felipedbene/haiku-mgmt-agent>"
 copyrights		{ "2026 Felipe de Bene and DeBeOS contributors" }
 licenses		{ "MIT" }
 
 provides {
-	haiku_mgmt_agent = @PLAIN_VERSION@
-	cmd:haiku_mgmt_agent = @PLAIN_VERSION@
+	debeos_ssm_agent = @PLAIN_VERSION@
+	cmd:debeos_ssm_agent = @PLAIN_VERSION@
 }
 
 requires {

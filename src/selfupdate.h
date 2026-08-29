@@ -4,7 +4,7 @@
 //
 //   { "version": "0.2.0",
 //     "sha256":  "<hex sha256 of the artifact>",
-//     "url":     "s3://bucket/path/haiku_mgmt_agent-0.2.0-1-arm64.hpkg" }
+//     "url":     "s3://bucket/path/debeos_ssm_agent-0.2.0-1-arm64.hpkg" }
 //
 // The agent updates only on a strictly greater version (loop guard), verifies
 // the checksum before anything irreversible, and prefers the OS's own package

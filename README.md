@@ -1,18 +1,22 @@
-# haiku-mgmt-agent
+# debeos_ssm_agent
 
-A minimal native SSM-compatible management agent for **Haiku on EC2 Graviton
-(arm64)** — enough of the AWS Systems Manager wire protocol that a Haiku instance
-shows up as a managed node and runs `AWS-RunShellScript` commands from the AWS
-console or CLI.
+An **independent, unofficial** SSM-compatible management agent for **DeBeOS on
+EC2 Graviton (arm64)**. It is **not** AWS's official SSM agent and is not
+affiliated with or endorsed by AWS — it is a clean-room client that implements
+enough of the AWS Systems Manager wire protocol that a DeBeOS instance shows up
+as a managed node and runs `AWS-RunShellScript` commands from the AWS console or
+CLI. (DeBeOS is the ARM-first OS descended from Haiku/BeOS; "Haiku" below refers
+to the kernel lineage wherever that is the accurate fact — the hrev, the 1970
+boot clock, packagefs.)
 
-Companion to [`haiku-graviton`](https://github.com/felipedbene/Haiku-Graviton) and
-[`haiku-on-ec2`](https://github.com/felipedbene/haiku-on-ec2).
+Package name: `debeos_ssm_agent` (binary `debeos-ssm-agent`). Companion to
+[`haiku-graviton`](https://github.com/felipedbene/Haiku-Graviton).
 
 ## Status: Phase 2 — fleet features on top of the proven Phase 1 MVP
 
 Phase 2 (this tree, v0.2.0) adds, per [`docs/design-roadmap.md`](docs/design-roadmap.md):
 
-- **F1 — native S3 transfer**: `haiku-mgmt-agent s3 cp <local> s3://bkt/key` (and
+- **F1 — native S3 transfer**: `debeos-ssm-agent s3 cp <local> s3://bkt/key` (and
   the reverse) with SigV4 `UNSIGNED-PAYLOAD` signing over the existing TLS stack,
   streaming both directions so a 400 MiB artifact never sits in RAM. Kills the
   scp publish-bridge and the wget source-seed shim.
@@ -22,7 +26,7 @@ Phase 2 (this tree, v0.2.0) adds, per [`docs/design-roadmap.md`](docs/design-roa
 - **F3 — self-update**: `--update-manifest s3://...` polls a version manifest hourly
   and installs a strictly-newer `.hpkg` via `pkgman` (the running binary lives on
   read-only packagefs, so the update *is* a package operation), then restarts the
-  service through `launch_roster`. Also available on demand: `haiku-mgmt-agent
+  service through `launch_roster`. Also available on demand: `debeos-ssm-agent
   self-update --manifest URI [--restart]`.
 - **CancelCommand actually cancels**: commands now run on worker threads; a cancel
   kills the whole process group (SIGTERM, then SIGKILL) and reports `Cancelled`.
@@ -97,8 +101,12 @@ than required. Evidence in `docs/BRIEF.md` §9.1.
 
 ## Build
 
-Cross-compiled; there is no native toolchain on the target. On an Ubuntu arm64
-host with the Haiku tree at `/opt/haiku/haiku`:
+The agent builds **natively** on a DeBeOS arm64 box now (the DeBeOS repo vends a
+native gcc/g++ toolchain): stage mbedTLS, then `make CXX=g++ STRIP=strip
+MBEDTLS=<path-to-static-mbedtls>` produces `build/debeos-ssm-agent`, and
+`packaging/build-hpkg.sh` (with the native `package` tool) produces the hpkg. The
+cross-compile recipe below still works from a non-DeBeOS host with the Haiku tree
+at `/opt/haiku/haiku`:
 
 ```sh
 # 1. Haiku arm64 cross-tools + a jam build (provides the sysroot's crt glue)
@@ -111,24 +119,36 @@ jam -q -j$(nproc) @minimum-raw
 ./tools/build-mbedtls.sh
 
 # 3. The agent
-make            # -> build/haiku-mgmt-agent
+make            # -> build/debeos-ssm-agent
 make check      # host-side unit tests (needs libmbedtls-dev)
 ```
 
-## Install on a Haiku instance
+## Install on a DeBeOS instance
 
 The instance needs an IAM role with `AmazonSSMManagedInstanceCore`.
 
+**Preferred — from the DeBeOS package repository** (the image already has the
+DeBeOS repo configured; this also arms F3 self-update for every later upgrade):
+
+```sh
+pkgman refresh
+pkgman install debeos_ssm_agent
+# binary lands at /boot/system/bin/debeos-ssm-agent
+# launch_daemon job at /boot/system/data/launch/debeos_ssm_agent (starts on boot)
+```
+
+**Manual — non-packaged install** (dev/one-off, no repo needed):
+
 ```sh
 KEY=~/.ssh/haiku-graviton-ed25519          # ed25519 only; RSA will not work
-scp -i $KEY build/haiku-mgmt-agent            baron@<ip>:/tmp/
-scp -i $KEY packaging/launch/haiku-mgmt-agent baron@<ip>:/tmp/launch-job
+scp -i $KEY build/debeos-ssm-agent            baron@<ip>:/tmp/
+scp -i $KEY packaging/launch/debeos_ssm_agent baron@<ip>:/tmp/launch-job
 
 ssh -i $KEY baron@<ip>
   mkdir -p /boot/system/non-packaged/bin
-  cp /tmp/haiku-mgmt-agent /boot/system/non-packaged/bin/
-  chmod +x /boot/system/non-packaged/bin/haiku-mgmt-agent
-  cp /tmp/launch-job /boot/system/settings/launch/haiku-mgmt-agent
+  cp /tmp/debeos-ssm-agent /boot/system/non-packaged/bin/
+  chmod +x /boot/system/non-packaged/bin/debeos-ssm-agent
+  cp /tmp/launch-job /boot/system/settings/launch/debeos_ssm_agent
   sync    # NOT optional -- see TESTING.md 5.3
 ```
 
@@ -139,18 +159,18 @@ contents.
 Verify without waiting for a boot:
 
 ```sh
-/boot/system/non-packaged/bin/haiku-mgmt-agent --ping-once --log-level debug
+/boot/system/non-packaged/bin/debeos-ssm-agent --ping-once --log-level debug
 ```
 
 ## Usage
 
 ```
-haiku-mgmt-agent [options]
+debeos-ssm-agent [options]
   --ping-once      send one UpdateInstanceInformation and exit
   --poll-once      run a single MDS poll cycle and exit
   --no-time-sync   do not set the system clock from IMDS
   --foreground     log to stderr as well as the log file
-  --log-file PATH  default /var/log/haiku-mgmt-agent.log
+  --log-file PATH  default /var/log/debeos-ssm-agent.log
   --log-level L    debug|info|warn|error
 ```
 

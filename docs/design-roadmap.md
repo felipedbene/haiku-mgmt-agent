@@ -1,10 +1,14 @@
-# haiku-mgmt-agent — design & next-feature roadmap (handoff)
+# `debeos_ssm_agent` — design & next-feature roadmap (handoff)
 
-Repo: `github.com/felipedbene/haiku-mgmt-agent`. Companion to DeBeOS
-(`github.com/felipedbene/Haiku-Graviton`). Target: **Haiku on EC2 Graviton
-(arm64)**. This doc is a self-contained handoff: current architecture, then a
-prioritized feature roadmap with per-feature design + verification. Account/region
-are operational (use env/placeholders in any committed file); SSM/S3 are public AWS.
+An **independent, unofficial** SSM-compatible client — **not** AWS's official SSM
+agent, and not affiliated with or endorsed by AWS. Package `debeos_ssm_agent`,
+binary `debeos-ssm-agent`. Repo: `github.com/felipedbene/haiku-mgmt-agent` (repo
+name unchanged). Companion to DeBeOS (`github.com/felipedbene/Haiku-Graviton`).
+Target: **DeBeOS on EC2 Graviton (arm64)** ("Haiku" appears only as the accurate
+kernel-lineage fact). This doc is a self-contained handoff: current architecture,
+then a prioritized feature roadmap with per-feature design + verification.
+Account/region are operational (use env/placeholders in any committed file);
+SSM/S3 are public AWS.
 
 ## 1. What it is today (Phase 1, working)
 
@@ -57,7 +61,7 @@ The DeBeOS native-build fleet drives long builds over SSM and hits two frictions
 agent can erase. Ranked:
 
 ### F1 — Native S3 transfer (GET/PUT)  ★ top lever
-A CLI subcommand: `haiku-mgmt-agent s3 cp <local> s3://<bkt>/<key>` and the reverse.
+A CLI subcommand: `debeos-ssm-agent s3 cp <local> s3://<bkt>/<key>` and the reverse.
 Signs S3 `PutObject`/`GetObject` with SigV4 over the existing TLS/HTTP stack using
 IMDS role creds — **incremental**, because SigV4 + HTTP/1.1 + TLS + IMDS creds already
 exist for SSM.
@@ -109,12 +113,12 @@ version).
 new AgentVersion in `describe-instance-information`.
 
 ### F4 — Bake into the AMI (auto-register every instance)
-Package `haiku_mgmt_agent` into the canonical image and let launch_daemon start it,
+Package `debeos_ssm_agent` into the canonical image and let launch_daemon start it,
 so every future instance self-registers as an SSM node.
 
 *Design:* an `AddFilesToHaikuImage`/package-in-image change in the DeBeOS bake
 (propose, don't bake unilaterally); launch_daemon job at
-`/boot/system/data/launch/haiku-mgmt-agent`; binary at `/boot/system/bin/`.
+`/boot/system/data/launch/debeos_ssm_agent`; binary at `/boot/system/bin/`.
 **The AMI cannot supply the IAM role** — the launch template / instance-profile must
 attach a role carrying `AmazonSSMManagedInstanceCore` (+ S3 perms for F1/F2). Document
 this as a consumer requirement. Retires the SSH-keepalive reaping friction entirely.
@@ -122,9 +126,46 @@ this as a consumer requirement. Retires the SSH-keepalive reaping friction entir
 *Verify:* launch a fresh instance from the baked AMI with the instance profile → it
 appears Online in SSM with no manual provisioning.
 
+### F5 — First-boot user-data execution  ← planned next iteration (after this rename)
+Give DeBeOS the cloud-init behaviour every other EC2 OS has: on boot the agent
+fetches `http://169.254.169.254/latest/user-data` over its **existing IMDS/HTTP
+path**; if the body is present and starts with `#!`, it writes it to a temp file
+and runs it once via `/bin/sh -c` as root (shell-script cloud-init semantics).
+
+*Why it's cheap:* almost entirely incremental — it reuses the IMDS client, the
+HTTP stack, and the existing `/bin/sh -c` exec path (`src/exec.cpp`) already built
+for `aws:runShellScript`. No new transport, no new dependency.
+
+*Execution frequency — a configurable MODE, not hardcoded run-once.* Mirrors
+cloud-init's `instance` vs `always`:
+- **`once`** (default): run once per instance; idempotency via a sentinel file
+  keyed on the instance-id (from IMDS), so a stop/start or reboot does not re-run
+  it, but a fresh instance from the same AMI does.
+- **`always`**: run the user-data on *every* boot, no sentinel gate.
+- The mode is a **setting the agent reads at boot** (e.g. a launch-line flag /
+  settings file), so an operator can **flip `once`↔`always` later without a
+  rebake**.
+
+*Ordering / execution slot.* User-data runs in an explicit, documented slot in the
+first-boot sequence: **after the clock-fix** (TLS/SigV4 and any HTTPS in the
+script need a correct clock), ordered relative to our own bootstrap steps
+(sshd-host-key generation, the FS-resize trigger). Leave room for a future
+before/after-bootstrap ordering knob so a script can run either ahead of or behind
+those steps.
+
+*Scope.* Shell-script (`#!`) user-data first. **cloud-config YAML is deferred**
+(record the trigger, same discipline as `aws-sdk-cpp` below): adopt a YAML parser
++ the module surface only when a concrete need forces it, not speculatively.
+
+*Verify:* launch an instance with `#!/bin/sh`…user-data → the script runs once and
+its effect is observable; a reboot in `once` mode does **not** re-run it; switching
+the mode to `always` makes every boot re-run it; malformed / absent user-data is a
+no-op.
+
 ## 3. Suggested implementation order
 F1 first (unblocks F2 + F3 and the fleet's I/O autonomy) → F2 (trivial once F1 lands)
-→ F4 (bake, needs human auth for the packaging gate) → F3 (self-update, nice-to-have).
+→ F4 (bake, needs human auth for the packaging gate) → F3 (self-update, nice-to-have)
+→ **F5 (first-boot user-data, the planned next iteration after the rename)**.
 Each is a separate feature branch + hpkg version bump; the agent is a single package so
 a version bump has no repo-index race with the build-wave staging prefix.
 
@@ -137,8 +178,8 @@ gain. Go's runtime/GC and Rust's std both assume libc/OS surfaces haiku/arm64 on
 partially provides, so you would port a runtime before writing agent logic. The
 artifact is ~1.1 MB and boots as the *first* manageable thing on a bare image. Rust
 now cross-compiles to Haiku arm64 in this project, so it is a candidate for a **new**
-component (e.g. an F5 Session Manager PTY/websocket path) — never a reason to rewrite
-the working agent.
+component (e.g. a future Session Manager PTY/websocket path) — never a reason to
+rewrite the working agent.
 
 **Adopt `aws-sdk-cpp` — deferred until it's a real need, not rejected outright.**
 Today it is the wrong trade: no haiku/arm64 build, and it pulls in libcurl + OpenSSL +
@@ -155,13 +196,13 @@ speculatively.**
 - Native build on a canonical arm64 box: install toolchain via DeBeOS repo
   (`graviton/scripts/haiku-provision-native-builder`), `make lib` for mbedTLS, then
   compile/link the agent (direct g++ works; the cross Makefile is optional).
-- Package: pkgroot = `bin/haiku-mgmt-agent` + `data/launch/haiku-mgmt-agent` +
-  `data/licenses/<license>` + `.PackageInfo` (name `haiku_mgmt_agent`, arch arm64,
+- Package: pkgroot = `bin/debeos-ssm-agent` + `data/launch/debeos_ssm_agent` +
+  `data/licenses/<license>` + `.PackageInfo` (name `debeos_ssm_agent`, arch arm64,
   vendor **DeBeOS**, `requires { haiku }`, mandatory `licenses{}`+`copyrights{}`).
-  `package create -C pkgroot haiku_mgmt_agent-<ver>-arm64.hpkg`.
+  `package create -C pkgroot debeos_ssm_agent-<ver>-arm64.hpkg`.
 - Publish to the DeBeOS CDN repo via `graviton/scripts/haiku-repo-publish-remote`.
 - Reproducible packaging now lives in-repo: `packaging/build-hpkg.sh` (+
-  `packaging/PackageInfo.in`, `LICENSE`, `packaging/launch/haiku-mgmt-agent-packaged`).
+  `packaging/PackageInfo.in`, `LICENSE`, `packaging/launch/debeos_ssm_agent-packaged`).
   v0.1.0 was packaged by hand; v0.2.0 uses the script.
 
 ### First-hop install caveat (0.1 → 0.2)

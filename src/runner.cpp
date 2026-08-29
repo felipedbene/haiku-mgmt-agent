@@ -91,7 +91,7 @@ StepResult unsupported(const std::string& plugin_id, const std::string& action,
     sr.status = "Failed";
     sr.code = 1;
     sr.standard_error =
-        "plugin '" + action + "' is not supported on Haiku. haiku-mgmt-agent implements " +
+        "plugin '" + action + "' is not supported on Haiku. debeos-ssm-agent implements " +
         std::string(kRunShellScript) +
         " only (see BRIEF.md section 2: Session Manager, inventory and self-update are out of scope).";
     sr.output = sr.standard_error;

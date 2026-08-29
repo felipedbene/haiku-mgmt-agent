@@ -1,4 +1,8 @@
-# Testing — haiku-mgmt-agent
+# Testing — `debeos_ssm_agent`
+
+> `debeos_ssm_agent` is an **independent, unofficial** SSM-compatible client for
+> DeBeOS on EC2 Graviton (arm64) — **not** AWS's official SSM agent. "Haiku"
+> below is the accurate kernel-lineage fact (hrev, packagefs, the 1970 boot clock).
 
 ## Phase 2 (v0.2.0) verification state
 
@@ -43,7 +47,7 @@ package repository to get one from (NOTES.md §1). Everything cross-compiles:
 | `jam -q -j16 @minimum-raw` | 9247 targets, clean. Upstream master builds arm64 **without** the haiku-graviton patches (those add GICv3/PSCI/ENA, not build fixes) |
 | `tools/stage-sysroot.sh` | sysroot at `/opt/haiku/sysroot-arm64`; hello-world links |
 | `tools/build-mbedtls.sh` (mbedTLS 3.6.2, `make lib`) | `libmbedtls.a libmbedx509.a libmbedcrypto.a`, `elf64-littleaarch64`. Compiled clean first try, including `net_sockets.c` |
-| `make` | `build/haiku-mgmt-agent`, 1.35 MB, warning-free |
+| `make` | `build/debeos-ssm-agent`, 1.35 MB, warning-free |
 
 Two portability fixes were needed for Haiku, both real gaps rather than
 guesswork:
@@ -131,7 +135,7 @@ stop is therefore **forced** after EC2's grace period. Plausibly related to
 ### 5.3 An unclean stop can corrupt recently-written files
 
 This one bit this project and cost a debugging cycle, so it is worth stating
-plainly. After a forced stop, `/boot/system/settings/launch/haiku-mgmt-agent`
+plainly. After a forced stop, `/boot/system/settings/launch/debeos-ssm-agent`
 came back with **the correct length (1367 bytes) and garbage content** —
 fragments of the ELF binary that had been copied to the same volume minutes
 earlier, i.e. stale freed blocks. BFS journals metadata, not file data, so the

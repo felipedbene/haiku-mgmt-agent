@@ -1,4 +1,8 @@
-# Design Doc: Remote Management for Haiku on EC2 ("SSM for Haiku")
+# Design Doc: `debeos_ssm_agent` — Remote Management for DeBeOS on EC2
+
+> An **independent, unofficial** SSM-compatible client for DeBeOS on EC2 Graviton
+> (arm64) — **not** AWS's official SSM agent, and not affiliated with or endorsed
+> by AWS. "Haiku" appears below only as the accurate kernel-lineage fact.
 
 **Status:** Draft
 **Date:** 2026-08-20
@@ -28,7 +32,7 @@ Question under evaluation: can we get SSM Agent — or an SSM-equivalent capabil
 Do **not** port amazon-ssm-agent. Build capability in phases, cheapest first:
 
 - **Phase 0 (now):** SSH-based fleet orchestration from a Linux control point. Zero new code on Haiku.
-- **Phase 1 (the real project):** `haiku-mgmt-agent` — a small native C++ daemon implementing the minimum SSM wire protocol: SigV4-signed calls to ec2messages (MDS) long-poll, execute `AWS-RunShellScript` documents via `/bin/sh`, report results. Run Command works from the AWS console/CLI against Haiku instances.
+- **Phase 1 (the real project):** `debeos-ssm-agent` — a small native C++ daemon implementing the minimum SSM wire protocol: SigV4-signed calls to ec2messages (MDS) long-poll, execute `AWS-RunShellScript` documents via `/bin/sh`, report results. Run Command works from the AWS console/CLI against Haiku instances.
 - **Phase 2 (explicitly parked):** Session Manager (MGS websocket protocol), inventory, self-update. Not in scope until Phase 1 is proven.
 
 ## 3. Options Considered
@@ -98,11 +102,11 @@ Option C costs nothing and should exist regardless — it is the operational fal
 
 Option B is the right shape: it converts "port two ecosystems" into "implement one narrow, stable wire protocol with tools that already work on the platform." The MDS surface needed for Run Command is small: SigV4 signing, `GetMessages` long-poll, `SendReply`/`AcknowledgeMessage`, document parse, shell exec, S3/inline output upload. Everything else is optional and separable.
 
-## 5. Proposed Architecture (Phase 1: haiku-mgmt-agent)
+## 5. Proposed Architecture (Phase 1: debeos-ssm-agent)
 
 ```
 ┌──────────────────────────────── Haiku instance ───┐
-│  haiku-mgmt-agent (C++ daemon, launched at boot)  │
+│  debeos-ssm-agent (C++ daemon, launched at boot)  │
 │   ├─ creds: IMDSv2 → role creds, auto-refresh     │
 │   ├─ mds client: SigV4 + HTTPS long-poll          │
 │   │    (libcurl + OpenSSL)                        │
@@ -122,7 +126,7 @@ Design points:
 - **Single binary, single thread pool, no plugin system.** The Go agent's worker/IPC architecture exists for features we are not building.
 - **Registration:** none needed on EC2 — `UpdateInstanceInformation` with role creds makes the instance appear as managed. Report `PlatformType` honestly (likely as Linux for console compatibility, with `PlatformName: Haiku` — verify what the console tolerates).
 - **Execution model:** MVP supports exactly one document type, `AWS-RunShellScript`, executed with `/bin/sh -c`. Unknown plugins are reported as Failed/Unsupported, never silently skipped.
-- **Boot integration:** Haiku UserBootscript or a proper launch_daemon entry; logs to `/var/log/haiku-mgmt-agent.log`.
+- **Boot integration:** Haiku UserBootscript or a proper launch_daemon entry; logs to `/var/log/debeos-ssm-agent.log`.
 - **Security:** outbound-only; no listening sockets. Command execution as root is the SSM model, gated by IAM on the AWS side. `DeniedPortForwardingRemoteIPs`-style protections are irrelevant until sessions exist.
 - **Protocol source of truth:** the Apache-2.0 Go agent source (`agent/` and `core/` trees) — read for wire format and error semantics, not translated line-by-line.
 

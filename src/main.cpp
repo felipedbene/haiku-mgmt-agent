@@ -1,4 +1,4 @@
-// haiku-mgmt-agent -- minimal SSM-compatible management agent for Haiku/arm64.
+// debeos-ssm-agent -- minimal SSM-compatible management agent for Haiku/arm64.
 //
 // Phase 1 (BRIEF.md 2): MDS long-poll, aws:runShellScript, inline output,
 // health ping. Phase 2 (docs/design-roadmap.md): native S3 transfer (F1),
@@ -40,11 +40,11 @@
 
 namespace {
 
-const char* kAgentName = "haiku-mgmt-agent";
+const char* kAgentName = "debeos-ssm-agent";
 const char* kAgentVersion = "0.2.1";
-const char* kDefaultLogPath = "/var/log/haiku-mgmt-agent.log";
-const char* kLaunchJob = "x-vnd.haiku-mgmt-agent";
-const char* kDefaultBinaryPath = "/boot/system/non-packaged/bin/haiku-mgmt-agent";
+const char* kDefaultLogPath = "/var/log/debeos-ssm-agent.log";
+const char* kLaunchJob = "x-vnd.debeos-ssm-agent";
+const char* kDefaultBinaryPath = "/boot/system/non-packaged/bin/debeos-ssm-agent";
 
 // BRIEF.md 9.2: the Go agent's long-poll ceiling is Mds.StopTimeoutMillis,
 // default 20 s. Our HTTP timeout must exceed it.
@@ -87,7 +87,7 @@ constexpr int kIdentityRetrySeconds = 6;
 
 void usage() {
     std::printf(
-        "haiku-mgmt-agent %s -- minimal SSM agent for Haiku/arm64\n"
+        "debeos-ssm-agent %s -- minimal SSM agent for Haiku/arm64\n"
         "\n"
         "daemon options:\n"
         "  --ping-once            send one UpdateInstanceInformation and exit (Stage 1 gate)\n"
@@ -289,7 +289,7 @@ struct Agent {
             logging::logf(logging::Error, "malformed SendCommand payload for %s: %s",
                           message_id.c_str(), err.c_str());
             // Tell the user (reply) and tell MDS to stop retrying (FailMessage).
-            std::string trace = "haiku-mgmt-agent could not parse the document payload: " + err;
+            std::string trace = "debeos-ssm-agent could not parse the document payload: " + err;
             send_reply(message_id, runner::reply_payload(info, "Failed", trace, {}), "SendReply(Failed)");
             aws::Credentials c;
             if (creds->get(c))
