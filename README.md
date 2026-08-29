@@ -8,8 +8,17 @@ console or CLI.
 Companion to [`haiku-graviton`](https://github.com/felipedbene/Haiku-Graviton) and
 [`haiku-on-ec2`](https://github.com/felipedbene/haiku-on-ec2).
 
-## Status: Phase 3 — Patch Manager (v0.3.0, host-validated; live gates pending)
+## Status: Phase 3 — Patch Manager + Session Manager (v0.4.0, host-validated; live gates pending)
 
+- **F6 — Session Manager (MGS)**: the agent opens the Message Gateway Service
+  control channel (a SigV4-signed WebSocket) and services `aws ssm start-session`
+  by opening a data channel, running the plugin handshake, and bridging a `/bin/sh`
+  pty to the customer. Interactive `Standard_Stream` shells only; Run Command still
+  rides the MDS long-poll. All self-contained: a hand-rolled RFC 6455 WebSocket
+  client (`src/websocket.cpp`), the binary MGS `AgentMessage` framing
+  (`src/mgs.cpp`), and the session/pty controller (`src/session.cpp`). Disable with
+  `--no-session-manager`. **Key unverified dependency: the haiku/arm64 pty layer**
+  (`posix_openpt` et al.) — see `docs/design-roadmap.md` F6.
 - **F5 — Patch Manager**: `AWS-RunPatchBaseline` (and the association variant) is
   intercepted by name and implemented natively on `pkgman` — the stock document's
   Linux step is a Python/yum payload that cannot run here. `Operation=Scan` lists

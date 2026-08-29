@@ -1,6 +1,7 @@
 #include "util.h"
 
 #include <mbedtls/md.h>
+#include <mbedtls/sha1.h>
 #include <mbedtls/sha256.h>
 
 #include <algorithm>
@@ -35,6 +36,59 @@ std::string sha256_file_hex(const std::string& path) {
     mbedtls_sha256_free(&ctx);
     if (!read_ok) return "";
     return to_hex(std::string(reinterpret_cast<char*>(out), sizeof(out)));
+}
+
+std::string sha256_raw(const std::string& data) {
+    unsigned char out[32];
+    mbedtls_sha256(reinterpret_cast<const unsigned char*>(data.data()), data.size(), out, 0);
+    return std::string(reinterpret_cast<char*>(out), sizeof(out));
+}
+
+std::string sha1_raw(const std::string& data) {
+    unsigned char out[20];
+    mbedtls_sha1(reinterpret_cast<const unsigned char*>(data.data()), data.size(), out);
+    return std::string(reinterpret_cast<char*>(out), sizeof(out));
+}
+
+std::string base64_encode(const std::string& raw) {
+    static const char* alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((raw.size() + 2) / 3) * 4);
+    size_t i = 0;
+    while (i + 3 <= raw.size()) {
+        uint32_t v = (static_cast<unsigned char>(raw[i]) << 16) |
+                     (static_cast<unsigned char>(raw[i + 1]) << 8) |
+                     static_cast<unsigned char>(raw[i + 2]);
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += alphabet[(v >> 6) & 63];
+        out += alphabet[v & 63];
+        i += 3;
+    }
+    if (i + 1 == raw.size()) {
+        uint32_t v = static_cast<unsigned char>(raw[i]) << 16;
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += "==";
+    } else if (i + 2 == raw.size()) {
+        uint32_t v = (static_cast<unsigned char>(raw[i]) << 16) |
+                     (static_cast<unsigned char>(raw[i + 1]) << 8);
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += alphabet[(v >> 6) & 63];
+        out += '=';
+    }
+    return out;
+}
+
+std::string random_bytes(size_t n) {
+    std::FILE* f = std::fopen("/dev/urandom", "rb");
+    if (!f) return "";
+    std::string out(n, '\0');
+    size_t got = std::fread(&out[0], 1, n, f);
+    std::fclose(f);
+    return got == n ? out : "";
 }
 
 std::string hmac_sha256(const std::string& key, const std::string& data) {

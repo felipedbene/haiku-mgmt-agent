@@ -12,6 +12,11 @@ namespace util {
 
 // ---- crypto (mbedTLS) ----
 std::string sha256_hex(const std::string& data);
+std::string sha256_raw(const std::string& data);  // 32 raw bytes (MGS payload digest)
+std::string sha1_raw(const std::string& data);    // 20 raw bytes (WebSocket accept key)
+std::string base64_encode(const std::string& raw);
+// Cryptographically random bytes from /dev/urandom ("" on failure).
+std::string random_bytes(size_t n);
 // Streaming digest of a file, for artifacts too big to slurp (self-update
 // binaries, S3 uploads). Returns "" when the file cannot be read.
 std::string sha256_file_hex(const std::string& path);

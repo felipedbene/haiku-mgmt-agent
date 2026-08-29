@@ -3,16 +3,19 @@
 // Phase 1 (BRIEF.md 2): MDS long-poll, aws:runShellScript, inline output,
 // health ping. Phase 2 (docs/design-roadmap.md): native S3 transfer (F1),
 // OutputS3BucketName command output (F2), self-update (F3), plus real
-// CancelCommand support. Still no MGS/Session Manager and no inventory.
+// CancelCommand support. Phase 3: Patch Manager over pkgman (F5) and Session
+// Manager over MGS (F6, interactive Standard_Stream shells).
 //
 // Threads: the poll loop (this thread), one health-ping thread, one worker
 // thread per in-flight command (so a long build cannot stall the poll loop and
-// a CancelCommand can actually land), and optionally a self-update checker.
+// a CancelCommand can actually land), optionally a self-update checker, and
+// optionally the MGS control-channel thread (which forks a worker per session).
 
 #include <signal.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -36,13 +39,14 @@
 #include "runner.h"
 #include "s3.h"
 #include "selfupdate.h"
+#include "session.h"
 #include "timesync.h"
 #include "util.h"
 
 namespace {
 
 const char* kAgentName = "haiku-mgmt-agent";
-const char* kAgentVersion = "0.3.0";
+const char* kAgentVersion = "0.4.0";
 const char* kDefaultLogPath = "/var/log/haiku-mgmt-agent.log";
 const char* kLaunchJob = "x-vnd.haiku-mgmt-agent";
 const char* kDefaultBinaryPath = "/boot/system/non-packaged/bin/haiku-mgmt-agent";
@@ -76,6 +80,7 @@ struct Options {
     bool ping_once = false;  // Stage 1 gate: one UpdateInstanceInformation, then exit
     bool poll_once = false;
     bool time_sync = true;
+    bool session_manager = true;  // open the MGS control channel for Session Manager
     std::string update_manifest;  // empty => no self-update polling
     std::string binary_path = kDefaultBinaryPath;
 };
@@ -94,6 +99,7 @@ void usage() {
         "  --ping-once            send one UpdateInstanceInformation and exit (Stage 1 gate)\n"
         "  --poll-once            run a single MDS poll cycle and exit\n"
         "  --no-time-sync         do not set the system clock from IMDS (Haiku boots at 1970)\n"
+        "  --no-session-manager   do not open the MGS control channel (Session Manager off)\n"
         "  --update-manifest URI  poll this s3://... or https://... manifest hourly and\n"
         "                         self-update when it names a newer version\n"
         "  --binary-path PATH     where a raw-binary self-update swaps the executable\n"
@@ -633,6 +639,7 @@ int main(int argc, char** argv) {
         if (a == "--ping-once") { opt.ping_once = true; opt.foreground = true; continue; }
         if (a == "--poll-once") { opt.poll_once = true; opt.foreground = true; continue; }
         if (a == "--no-time-sync") { opt.time_sync = false; continue; }
+        if (a == "--no-session-manager") { opt.session_manager = false; continue; }
         if (a == "--update-manifest" && i + 1 < argc) { opt.update_manifest = argv[++i]; continue; }
         if (a == "--binary-path" && i + 1 < argc) { opt.binary_path = argv[++i]; continue; }
         if (a == "--log-file" && i + 1 < argc) { opt.log_path = argv[++i]; continue; }
@@ -759,6 +766,34 @@ int main(int argc, char** argv) {
         });
     }
 
+    // F6: Session Manager. The control channel lives on its own thread and
+    // reconnects with backoff, mirroring the MDS poll loop's resilience. Each
+    // interactive session forks a pty-backed /bin/sh inside session::run.
+    std::thread session_thread;
+    if (opt.session_manager) {
+        session_thread = std::thread([&agent, &provider, &opt]() {
+            session::Options sopt;
+            sopt.creds = &provider;
+            sopt.region = agent.id.region;
+            sopt.instance_id = agent.id.instance_id;
+            sopt.agent_version = kAgentVersion;
+            sopt.stop = &g_stop;
+            int backoff = 2;
+            while (!g_stop.load()) {
+                // ensure the clock is sane before the signed WS upgrade
+                timesync::ensure_clock(agent.imds, opt.time_sync, kMaxClockDriftSeconds);
+                bool ok = session::run(sopt);
+                if (g_stop.load()) break;
+                // Clean server-side close returns true: reconnect promptly.
+                // A failure returns false: back off up to 60 s.
+                int wait = ok ? 2 : backoff;
+                for (int s = 0; s < wait && !g_stop.load(); s++) ::sleep(1);
+                backoff = ok ? 2 : std::min(backoff * 2, 60);
+            }
+            logging::info("session manager thread stopping");
+        });
+    }
+
     unsigned seed = static_cast<unsigned>(util::now_epoch_ms() ^ ::getpid());
     while (!g_stop.load()) {
         const int64_t elapsed = agent.poll_once();
@@ -779,6 +814,7 @@ int main(int argc, char** argv) {
         logging::warn("in-flight commands did not finish within the drain window");
     health.join();
     if (updater.joinable()) updater.join();
+    if (session_thread.joinable()) session_thread.join();
     logging::logf(logging::Info, "%s stopped", kAgentName);
     return 0;
 }

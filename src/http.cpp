@@ -114,15 +114,23 @@ public:
         return true;
     }
 
-    // >0 bytes, 0 on clean EOF, -1 on error.
+    // >0 bytes, 0 on clean EOF, -1 on error, -2 on recv timeout (SO_RCVTIMEO).
     ssize_t recv_some(char* buf, size_t len, std::string& err) {
         while (true) {
             ssize_t n = ::recv(fd_, buf, len, 0);
             if (n >= 0) return n;
             if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return -2;
             err = std::string("recv: ") + std::strerror(errno);
             return -1;
         }
+    }
+
+    void set_recv_timeout(int timeout_ms) {
+        struct timeval tv {};
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     }
 
 private:
@@ -296,6 +304,7 @@ struct TlsTransport : Transport {
             if (rc > 0) return rc;
             if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
             if (rc == 0 || rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) return 0;
+            if (rc == MBEDTLS_ERR_SSL_TIMEOUT) return -2;  // SO_RCVTIMEO via bio_recv
             err = "ssl_read: " + mbed_err(rc);
             return -1;
         }
@@ -311,7 +320,7 @@ bool read_headers(Transport& t, std::string& buf, Response& resp) {
         std::string err;
         ssize_t n = t.read(chunk, sizeof(chunk), err);
         if (n < 0) {
-            resp.error = err;
+            resp.error = err.empty() ? "read timeout" : err;
             return false;
         }
         if (n == 0) {
@@ -418,7 +427,7 @@ bool read_body(Transport& t, std::string& pending, Response& resp, BodySink& sin
             std::string err;
             ssize_t n = t.read(chunk, sizeof(chunk), err);
             if (n < 0) {
-                resp.error = err;
+                resp.error = err.empty() ? "read timeout" : err;
                 return false;
             }
             if (n == 0) return false;  // EOF; caller decides if that is fatal
@@ -488,7 +497,7 @@ bool read_body(Transport& t, std::string& pending, Response& resp, BodySink& sin
         std::string err;
         ssize_t n = t.read(chunk, sizeof(chunk), err);
         if (n < 0) {
-            resp.error = err;
+            resp.error = err.empty() ? "read timeout" : err;
             return false;
         }
         if (n == 0) return sink.finish();
@@ -579,5 +588,63 @@ Response perform(const Request& req) {
     read_body(*t, pending, resp, sink);  // body errors are recorded in resp.error
     return resp;
 }
+
+// ---------------------------------------------------------------- Stream
+
+struct Stream::Impl {
+    Socket sock;
+    TlsTransport tls;
+    PlainTransport plain{&sock};
+    Transport* transport = nullptr;
+};
+
+Stream::Stream() : impl_(new Impl) {}
+Stream::~Stream() = default;
+
+bool Stream::connect(const std::string& host, int port, bool tls, int timeout_ms,
+                     std::string& err) {
+    close();
+    impl_.reset(new Impl);
+    if (!impl_->sock.connect(host, port, timeout_ms, err)) return false;
+    if (tls) {
+        if (!impl_->tls.handshake(&impl_->sock, host, err)) {
+            impl_->sock.close();
+            return false;
+        }
+        impl_->transport = &impl_->tls;
+    } else {
+        impl_->transport = &impl_->plain;
+    }
+    return true;
+}
+
+bool Stream::write(const char* data, size_t len, std::string& err) {
+    if (!impl_->transport) {
+        err = "stream not connected";
+        return false;
+    }
+    return impl_->transport->write(data, len, err);
+}
+
+ssize_t Stream::read(char* buf, size_t len, std::string& err) {
+    if (!impl_->transport) {
+        err = "stream not connected";
+        return -1;
+    }
+    return impl_->transport->read(buf, len, err);
+}
+
+void Stream::set_recv_timeout(int timeout_ms) {
+    if (impl_->transport) impl_->sock.set_recv_timeout(timeout_ms);
+}
+
+void Stream::close() {
+    if (impl_) {
+        impl_->transport = nullptr;
+        impl_->sock.close();
+    }
+}
+
+bool Stream::connected() const { return impl_ && impl_->transport != nullptr; }
 
 }  // namespace http

@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "http.h"
 #include "json.h"
@@ -83,6 +85,17 @@ http::Response call(const std::string& service, const std::string& target_prefix
 // Exposed for unit testing against the AWS SigV4 test vectors.
 std::string signing_key(const std::string& secret, const std::string& datestamp,
                         const std::string& region, const std::string& service);
+
+// Generic SigV4 header set for any HTTPS request. Used by MGS (F6): its REST
+// calls POST to a path (not "/"), and its WebSocket upgrade is a signed GET
+// with a query string -- neither fits call() above. `path` must already be
+// URI-encoded; `query` must already be canonical (keys sorted, RFC 3986
+// encoded) or empty. Returns X-Amz-Date, X-Amz-Security-Token (if any) and
+// Authorization; the caller adds Host itself. `now` is exposed for tests.
+std::vector<std::pair<std::string, std::string>> sigv4_headers(
+    const std::string& method, const std::string& service, const std::string& region,
+    const Credentials& creds, const std::string& host, const std::string& path,
+    const std::string& query, const std::string& payload_sha256_hex, int64_t now);
 
 // ---- API wrappers ----
 

@@ -14,10 +14,13 @@
 #include "exec.h"
 #include "json.h"
 #include "log.h"
+#include "mgs.h"
 #include "patch.h"
 #include "runner.h"
 #include "s3.h"
+#include "session.h"
 #include "util.h"
+#include "websocket.h"
 
 namespace {
 
@@ -519,6 +522,170 @@ void test_precondition_skip() {
     }
 }
 
+void test_base64_and_ws_accept() {
+    std::printf("crypto: base64 + websocket accept key\n");
+    // RFC 4648 vectors.
+    check_eq(util::base64_encode(""), "", "base64 empty");
+    check_eq(util::base64_encode("f"), "Zg==", "base64 'f'");
+    check_eq(util::base64_encode("fo"), "Zm8=", "base64 'fo'");
+    check_eq(util::base64_encode("foo"), "Zm9v", "base64 'foo'");
+    check_eq(util::base64_encode("foob"), "Zm9vYg==", "base64 'foob'");
+    check_eq(util::base64_encode("foobar"), "Zm9vYmFy", "base64 'foobar'");
+    // The canonical RFC 6455 handshake example.
+    check_eq(ws::accept_key_for("dGhlIHNhbXBsZSBub25jZQ=="),
+             "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", "RFC 6455 Sec-WebSocket-Accept");
+}
+
+void test_ws_framing() {
+    std::printf("websocket: frame round-trip\n");
+    const unsigned char mask[4] = {0x12, 0x34, 0x56, 0x78};
+
+    // Short payload.
+    std::string wire = ws::make_frame(ws::kOpBinary, "hello", mask);
+    check(static_cast<unsigned char>(wire[0]) == 0x82, "FIN + binary opcode");
+    check((static_cast<unsigned char>(wire[1]) & 0x80) != 0, "client frame is masked");
+    check((static_cast<unsigned char>(wire[1]) & 0x7F) == 5, "length 5");
+    // Servers send unmasked frames; build one directly (FIN + opcode, len, data).
+    auto server_frame = [](uint8_t opcode, const std::string& data) {
+        std::string f;
+        f += static_cast<char>(0x80 | opcode);
+        if (data.size() < 126) {
+            f += static_cast<char>(data.size());
+        } else {
+            f += static_cast<char>(126);
+            f += static_cast<char>((data.size() >> 8) & 0xFF);
+            f += static_cast<char>(data.size() & 0xFF);
+        }
+        f += data;
+        return f;
+    };
+
+    std::string server = server_frame(ws::kOpBinary, "hello");
+    bool fin = false;
+    uint8_t op = 0;
+    std::string payload, err;
+    int rc = ws::parse_frame(server, fin, op, payload, err);
+    check(rc == 1, "parse short frame: " + err);
+    check(fin && op == ws::kOpBinary, "fin + opcode preserved");
+    check_eq(payload, "hello", "unmasked payload parses");
+
+    // Extended 16-bit length.
+    std::string big(300, 'x');
+    std::string bframe = server_frame(ws::kOpText, big);
+    payload.clear();
+    rc = ws::parse_frame(bframe, fin, op, payload, err);
+    check(rc == 1 && payload.size() == 300, "300-byte frame parses");
+
+    // Partial frame: parser must ask for more, not error.
+    std::string partial = server_frame(ws::kOpBinary, "abcdef").substr(0, 3);
+    payload.clear();
+    rc = ws::parse_frame(partial, fin, op, payload, err);
+    check(rc == 0, "partial frame returns need-more");
+
+    // And a client frame that we generate must decode back through its own mask.
+    std::string masked = ws::make_frame(ws::kOpBinary, "roundtrip", mask);
+    // Feed it to a mask-aware decode by clearing the "server must be unmasked"
+    // assumption is not exposed; instead verify the mask actually changed bytes.
+    check(masked.substr(6) != "roundtrip", "client payload is masked on the wire");
+}
+
+void test_mgs_agentmessage() {
+    std::printf("mgs: AgentMessage serialize/deserialize\n");
+
+    // UUID wire order: least-significant half is written first (putUuid).
+    unsigned char wire[16];
+    const std::string uuid = "12345678-9abc-def0-1122-334455667788";
+    check(mgs::uuid_to_wire(uuid, wire), "uuid parses");
+    check_eq(mgs::uuid_from_wire(wire), uuid, "uuid wire round-trip");
+    // Verify the half-swap explicitly.
+    check(wire[0] == 0x11 && wire[1] == 0x22, "LSB half written first");
+    check(wire[8] == 0x12 && wire[9] == 0x34, "MSB half written second");
+
+    mgs::AgentMessage m;
+    m.message_type = mgs::kMsgOutputStreamData;
+    m.schema_version = 1;
+    m.created_ms = 1724900000000ULL;
+    m.sequence = 7;
+    m.flags = 1;
+    m.message_id = uuid;
+    m.payload_type = mgs::kPayloadOutput;
+    m.payload = "some shell output\n";
+
+    std::string raw = mgs::serialize(m);
+    check(raw.size() == 120 + m.payload.size(), "frame is header(120) + payload");
+    // Header length field is 116.
+    check(static_cast<unsigned char>(raw[3]) == 116, "HeaderLength = 116");
+    // MessageType is space-padded in its 32-byte field.
+    check(raw[4 + m.message_type.size()] == ' ', "message type space-padded");
+
+    mgs::AgentMessage back;
+    std::string err;
+    check(mgs::deserialize(raw, back, err), "deserialize ok: " + err);
+    check_eq(back.message_type, m.message_type, "type round-trip");
+    check(back.sequence == 7, "sequence round-trip");
+    check(back.flags == 1, "flags round-trip");
+    check(back.payload_type == mgs::kPayloadOutput, "payload type round-trip");
+    check_eq(back.message_id, uuid, "message id round-trip");
+    check_eq(back.payload, m.payload, "payload round-trip");
+
+    // A corrupted payload must fail the digest check.
+    raw[125] = raw[125] ^ 0xFF;
+    mgs::AgentMessage bad;
+    check(!mgs::deserialize(raw, bad, err), "digest mismatch rejected");
+
+    // A truncated frame is rejected, not read out of bounds.
+    check(!mgs::deserialize(raw.substr(0, 50), bad, err), "short frame rejected");
+}
+
+void test_session_parsing() {
+    std::printf("session: start request + handshake\n");
+
+    // interactive_shell payload: envelope with a stringified inner document.
+    const std::string inner =
+        R"({"SessionId":"user-0abc","DocumentName":"SSM-SessionManagerRunShell",)"
+        R"("DocumentContent":{"schemaVersion":"1.0","sessionType":"Standard_Stream",)"
+        R"("inputs":{"runAsEnabled":false,"runAsDefaultUser":"","kmsKeyId":"",)"
+        R"("shellProfile":{"linux":"echo hi"}}}})";
+    // The envelope's Content is that document as a JSON string.
+    json::Value env = json::obj();
+    env.object["Content"] = json::str(inner);
+    session::StartRequest sr = session::parse_start_request(json::dump(env));
+    check(sr.error.empty(), "start request parsed: " + sr.error);
+    check_eq(sr.session_id, "user-0abc", "session id");
+    check_eq(sr.session_type, "Standard_Stream", "session type");
+    check_eq(sr.shell_commands, "echo hi", "shell profile commands");
+    check(!sr.run_as_enabled, "runAs disabled");
+
+    session::StartRequest bad = session::parse_start_request("not json");
+    check(!bad.error.empty(), "garbage payload rejected");
+
+    // Handshake request shape.
+    std::string hs = session::build_handshake_request("0.4.0", "Standard_Stream", json::obj());
+    std::string jerr;
+    json::Value hv = json::parse(hs, &jerr);
+    check(jerr.empty() && hv.is_obj(), "handshake request is JSON");
+    check_eq(hv.str_at("AgentVersion"), "0.4.0", "agent version in handshake");
+    const json::Value* actions = hv.find("RequestedClientActions");
+    check(actions && actions->is_arr() && actions->array.size() == 1, "one requested action");
+    if (actions && actions->array.size() == 1) {
+        check_eq(actions->array[0].str_at("ActionType"), "SessionType", "action type");
+        const json::Value* ap = actions->array[0].find("ActionParameters");
+        check(ap && ap->str_at("SessionType") == "Standard_Stream", "session type in params");
+    }
+
+    // Handshake response acceptance (numeric and string ActionStatus).
+    std::string cv, herr;
+    check(session::handshake_response_ok(
+              R"({"ClientVersion":"1.2.0","ProcessedClientActions":[{"ActionType":"SessionType","ActionStatus":1}]})",
+              cv, herr),
+          "numeric success accepted: " + herr);
+    check_eq(cv, "1.2.0", "client version extracted");
+    check(!session::handshake_response_ok(
+              R"({"ProcessedClientActions":[{"ActionType":"SessionType","ActionStatus":2,"Error":"nope"}]})",
+              cv, herr),
+          "failed action rejected");
+}
+
 }  // namespace
 
 int main() {
@@ -544,6 +711,10 @@ int main() {
     test_patch_parsing();
     test_patch_params_and_inventory();
     test_precondition_skip();
+    test_base64_and_ws_accept();
+    test_ws_framing();
+    test_mgs_agentmessage();
+    test_session_parsing();
 
     std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

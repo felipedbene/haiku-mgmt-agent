@@ -1,11 +1,32 @@
 # Testing — haiku-mgmt-agent
 
-## Phase 3 (v0.3.0, `phase3-patch-manager`) — host-validated, live gates PENDING
+## Phase 3 (v0.4.0, `phase3-patch-manager`) — host-validated, live gates PENDING
 
-**Date:** 2026-08-29. Host-side: 163/163 unit checks pass (`make check`),
-including the new pkgman-transaction parser, patch params/inventory-item
-builders, and the schema-2.2 precondition skip; `main`, `selfupdate` and
-`timesync` compile warning-free.
+**Date:** 2026-08-29. Host-side: 209/209 unit checks pass (`make check`),
+covering F5 (pkgman-transaction parser, patch params/inventory-item builders,
+schema-2.2 precondition skip) and F6 (base64/WebSocket-accept vectors, RFC 6455
+frame round-trip, MGS `AgentMessage` serialize/deserialize incl. the UUID
+half-swap and payload-digest rejection, and session/handshake JSON parsing).
+`main`, `session`, `mgs`, `websocket`, `selfupdate` and `timesync` compile
+warning-free (`-Wall -Wextra`).
+
+Live gates for F6 (Session Manager — need a Haiku node + human authorization;
+see the F6 block in `docs/design-roadmap.md`):
+
+| Gate | Result |
+|---|---|
+| `posix_openpt`/`grantpt`/`unlockpt`/`ptsname` work on haiku/arm64 | PENDING — make-or-break |
+| Control channel opens (CreateControlChannel + signed WS upgrade) | PENDING |
+| `aws ssm start-session --target <id>` reaches an interactive prompt | PENDING |
+| Keystrokes echo; `ls`/`env` run; terminal resize (`TIOCSWINSZ`) applies | PENDING |
+| `exit` closes cleanly; console shows session Terminated | PENDING |
+| Run Command (MDS) still works with the control channel also open | PENDING |
+
+The MGS wire format (binary `AgentMessage`, signed WS upgrade, handshake) is
+unit-tested against the documented Go-agent layout, not yet against the live
+service; the pty layer is the single largest unknown.
+
+## Phase 3 (v0.3.0) — Patch Manager, host-validated, live gates PENDING
 
 Live gates for F5 (need a Haiku node + the usual human authorization; see the
 F5 *Verify* block in `docs/design-roadmap.md`):

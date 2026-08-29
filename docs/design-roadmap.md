@@ -152,6 +152,50 @@ differs, fix `parse_pkgman_transaction` and its vectors together. Also confirm
 `PutInventory` accepts the 1.0 schemas (adjust attribute sets if it 400s).
 IAM: the instance role needs `ssm:PutInventory` (in `AmazonSSMManagedInstanceCore`).
 
+### F6 — Session Manager / MGS (implemented on `phase3-patch-manager`, live gates PENDING)
+Phase 1/2 deliberately skipped MGS; F6 adds it. The agent opens the MGS **control
+channel** (a SigV4-signed WebSocket to `ssmmessages.<region>.amazonaws.com`) and,
+per `StartSession`, opens a **data channel**, runs the plugin handshake, and bridges
+a `/bin/sh` pty to the customer. Interactive `Standard_Stream` shells only — port
+forwarding and NonInteractiveCommands are out of scope; Run Command still rides MDS.
+
+New self-contained building blocks (same "no library to link" reason as the rest):
+- `src/websocket.{h,cpp}` — RFC 6455 client over a persistent `http::Stream`
+  (masking, fragmentation, ping/pong/close). No libwebsockets on haiku/arm64.
+- `src/http.cpp` `Stream` — a persistent bidirectional TLS connection (the WS
+  transport), factored out of the one-shot `perform()` path.
+- `src/mgs.{h,cpp}` — the binary `AgentMessage` frame (116-byte header, big-endian,
+  space-padded 32-byte type, **UUID written least-significant-half-first** per the Go
+  agent's `putUuid`, SHA-256 payload digest) and the `CreateControlChannel`/
+  `CreateDataChannel` REST calls.
+- `src/session.{h,cpp}` — control-channel loop + per-session pty bridge, plus the
+  handshake request/response and `interactive_shell` envelope parsing (the payload
+  is a JSON envelope whose `Content` is a *stringified* inner document).
+- `aws::sigv4_headers` — generalized SigV4 (arbitrary method/path/query) for the MGS
+  REST POSTs and the signed WS upgrade GET, which `call()`'s POST-to-"/" shape can't do.
+- `util::{sha1_raw,sha256_raw,base64_encode,random_bytes}` — WS accept key + framing.
+
+Control channel runs on its own thread with reconnect/backoff (mirrors the MDS poll
+loop); each session forks a pty-backed shell on a worker thread (mirrors Run Command's
+worker model). `--no-session-manager` disables it. SSMConnectionChannel stays
+`ec2messages`: MDS remains the primary work channel and Run Command routing must not
+change.
+
+*Key hardware risks to validate first (cannot be exercised on the Linux build host):*
+- **pty availability** — `posix_openpt`/`grantpt`/`unlockpt`/`ptsname` and
+  `TIOCSWINSZ` on haiku/arm64. This is the make-or-break dependency; if the SUSv3
+  pty layer is incomplete, the shell bridge needs a Haiku-specific path.
+- **WebSocket upgrade signing** — whether MGS accepts our SigV4-over-GET upgrade
+  (query string in the canonical request) exactly as the Go agent's does.
+- **AgentMessage byte order** — the UUID half-swap and big-endian header, verified in
+  unit tests against the documented layout but not yet against a live channel.
+
+*Verify:* `aws ssm start-session --target <id>` from a machine with the session-manager
+plugin → interactive prompt, keystrokes echo, `env`/`ls` work, terminal resize
+propagates, `exit` closes cleanly and the console shows the session Terminated. IAM:
+the instance role needs the `ssmmessages:*` actions (already in
+`AmazonSSMManagedInstanceCore`).
+
 ## 3. Suggested implementation order
 F1 first (unblocks F2 + F3 and the fleet's I/O autonomy) → F2 (trivial once F1 lands)
 → F4 (bake, needs human auth for the packaging gate) → F3 (self-update, nice-to-have).

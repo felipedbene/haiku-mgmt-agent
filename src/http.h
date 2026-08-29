@@ -5,6 +5,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,34 @@ struct Response {
 
 // Performs one request on a fresh connection. Thread-safe.
 Response perform(const Request& req);
+
+// A persistent bidirectional connection (F6: the WebSocket transport for MGS).
+// Unlike perform(), the caller owns framing and connection lifetime. Not
+// thread-safe by itself; ws::Client serializes access.
+class Stream {
+public:
+    Stream();
+    ~Stream();
+    Stream(const Stream&) = delete;
+    Stream& operator=(const Stream&) = delete;
+
+    bool connect(const std::string& host, int port, bool tls, int timeout_ms, std::string& err);
+    bool write(const char* data, size_t len, std::string& err);
+    bool write(const std::string& data, std::string& err) {
+        return write(data.data(), data.size(), err);
+    }
+    // >0 bytes read; 0 clean EOF; -1 fatal error; -2 recv timeout (no data yet,
+    // connection still healthy -- how the WS loop polls without blocking forever).
+    ssize_t read(char* buf, size_t len, std::string& err);
+    // Adjust the per-recv timeout after connect (poll cadence for WS reads).
+    void set_recv_timeout(int timeout_ms);
+    void close();
+    bool connected() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // Trust anchors used for TLS. The agent ships its own set rather than relying
 // on a system CA store, because haiku/arm64 has none (open question 3).
