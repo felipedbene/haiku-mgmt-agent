@@ -93,6 +93,14 @@ std::string iso8601(int64_t epoch_ms) {
     return buf;
 }
 
+std::string iso8601_seconds(int64_t epoch) {
+    struct tm tm = gmt(epoch);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return buf;
+}
+
 std::string iso_dash(int64_t epoch_ms) {
     struct tm tm = gmt(epoch_ms / 1000);
     char buf[64];

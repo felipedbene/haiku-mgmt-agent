@@ -122,6 +122,36 @@ this as a consumer requirement. Retires the SSH-keepalive reaping friction entir
 *Verify:* launch a fresh instance from the baked AMI with the instance profile → it
 appears Online in SSM with no manual provisioning.
 
+### F5 — Patch Manager (implemented on `phase3-patch-manager`, pending live gates)
+`AWS-RunPatchBaseline`'s Linux step is a Python payload driving yum/apt/zypper —
+none of which exist on Haiku — so the agent **intercepts the document by name**
+(`AWS-RunPatchBaseline`, `AWS-RunPatchBaselineAssociation`) and implements the two
+operations natively on pkgman (`src/patch.cpp`):
+- **Scan**: `pkgman refresh`, then a dry transaction (`echo n | pkgman update`)
+  parsed for upgrade/install/downgrade lines. Every available update counts as an
+  approved **Missing** patch — there is no real Haiku patch baseline to filter by.
+- **Install**: `pkgman update -y`, then a re-scan; what is still pending is Missing.
+- **Compliance**: `PutInventory` with `AWS:PatchSummary` (drives
+  `describe-instance-patch-states` / the dashboard counts) and `AWS:PatchCompliance`
+  (per-patch rows). A failed PutInventory fails the step — a patch run whose record
+  did not land must be visible, or the dashboard silently goes stale.
+- **Reboots**: never. A `haiku`/`haiku_loader` update is reported as
+  `InstalledPendingReboot`; the agent cannot resume a command across a reboot.
+- **CLI**: `haiku-mgmt-agent patch scan|install [--no-report]` runs the same code
+  path on-box for testing.
+- Side fix: schema-2.2 `precondition` handling in `runner.cpp` — steps whose
+  `{"StringEquals": ["platformType", ...]}` excludes Linux report `Skipped` instead
+  of failing the document (we present PlatformType=Linux).
+
+*Verify (needs a live instance + human gate):* `aws ssm send-command
+--document-name AWS-RunPatchBaseline --parameters 'Operation=Scan'` → Success with a
+readable update list; `describe-instance-patch-states` shows the counts;
+`Operation=Install` applies updates and flips Missing→0; the pkgman transaction
+parser assumptions (`tests/`) hold against real pkgman output — if the phrasing
+differs, fix `parse_pkgman_transaction` and its vectors together. Also confirm
+`PutInventory` accepts the 1.0 schemas (adjust attribute sets if it 400s).
+IAM: the instance role needs `ssm:PutInventory` (in `AmazonSSMManagedInstanceCore`).
+
 ## 3. Suggested implementation order
 F1 first (unblocks F2 + F3 and the fleet's I/O autonomy) → F2 (trivial once F1 lands)
 → F4 (bake, needs human auth for the packaging gate) → F3 (self-update, nice-to-have).

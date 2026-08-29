@@ -14,6 +14,7 @@
 #include "exec.h"
 #include "json.h"
 #include "log.h"
+#include "patch.h"
 #include "runner.h"
 #include "s3.h"
 #include "util.h"
@@ -376,6 +377,148 @@ void test_sha256_file() {
     ::remove(path);
 }
 
+void test_patch_parsing() {
+    std::printf("patch: pkgman transaction parsing\n");
+
+    check(patch::is_patch_document("AWS-RunPatchBaseline"), "AWS-RunPatchBaseline intercepted");
+    check(patch::is_patch_document("AWS-RunPatchBaselineAssociation"),
+          "association variant intercepted");
+    check(!patch::is_patch_document("AWS-RunShellScript"), "shell script not intercepted");
+
+    std::string name, ver;
+    patch::split_name_version("openssl3-3.0.16-1", name, ver);
+    check_eq(name, "openssl3", "name with trailing digit");
+    check_eq(ver, "3.0.16-1", "version with revision");
+    patch::split_name_version("haiku-r1~beta5_hrev59996-1", name, ver);
+    check_eq(name, "haiku", "name before non-numeric version");
+    check_eq(ver, "r1~beta5_hrev59996-1", "hrev-style version");
+
+    // Both phrasings pkgman is known to emit, plus repository tails and noise.
+    const std::string transaction =
+        "Refreshing repository \"Haiku\"...\n"
+        "The following changes will be made:\n"
+        "  in system:\n"
+        "    upgrade package openssl3-3.0.14-1 to 3.0.16-1\n"
+        "    upgrade package haiku-r1~beta5_hrev59996-1 to version r1~beta5_hrev60011-1 "
+        "from repository Haiku\n"
+        "    install package ncurses6-6.4-1 from repository HaikuPorts\n"
+        "Continue? [yes/no] (yes) : \n";
+    std::vector<patch::Update> ups = patch::parse_pkgman_transaction(transaction);
+    check(ups.size() == 3, "three transaction lines parsed, got " + std::to_string(ups.size()));
+    if (ups.size() == 3) {
+        check_eq(ups[0].name, "openssl3", "upgrade name");
+        check_eq(ups[0].from, "3.0.14-1", "upgrade from");
+        check_eq(ups[0].to, "3.0.16-1", "upgrade to");
+        check_eq(ups[1].name, "haiku", "system package name");
+        check_eq(ups[1].to, "r1~beta5_hrev60011-1", "to-version phrasing, repo tail stripped");
+        check_eq(ups[2].kind, "install", "install kind");
+        check_eq(ups[2].name, "ncurses6", "install name");
+        check_eq(ups[2].to, "6.4-1", "install version");
+        check(ups[2].from.empty(), "install has no from-version");
+    }
+    check(patch::parse_pkgman_transaction("Nothing to do.\n").empty(),
+          "up-to-date system parses to no updates");
+}
+
+void test_patch_params_and_inventory() {
+    std::printf("patch: params and inventory items\n");
+    std::string err;
+
+    // SendCommandPayload parameters arrive as one-element arrays.
+    json::Value params = json::parse(
+        R"({"Operation":["Install"],"RebootOption":["NoReboot"],"SnapshotId":["snap-1"]})", &err);
+    patch::Params p = patch::parse_params(params);
+    check(p.error.empty(), "valid params accepted: " + p.error);
+    check_eq(p.operation, "Install", "operation normalized");
+    check_eq(p.reboot_option, "NoReboot", "reboot option honored");
+    check_eq(p.snapshot_id, "snap-1", "snapshot id read");
+
+    p = patch::parse_params(json::parse(R"({"Operation":["scan"]})", &err));
+    check_eq(p.operation, "Scan", "case-insensitive operation");
+    check_eq(p.reboot_option, "RebootIfNeeded", "default reboot option");
+
+    p = patch::parse_params(json::parse(R"({"Operation":["Nuke"]})", &err));
+    check(!p.error.empty(), "unknown operation rejected");
+
+    patch::Report r;
+    r.operation = "Install";
+    r.operation_start = "2026-08-29T01:00:00Z";
+    r.operation_end = "2026-08-29T01:05:00Z";
+    r.execution_id = "cmd-123";
+    r.reboot_option = "NoReboot";
+    r.installed_count = 214;
+    r.installed = {{"upgrade", "openssl3", "3.0.14-1", "3.0.16-1"},
+                   {"upgrade", "haiku", "r1-1", "r2-1"}};
+    r.missing = {{"upgrade", "ncurses6", "6.3-1", "6.4-1"}};
+
+    json::Value items = patch::inventory_items(r, "2026-08-29T01:05:00Z");
+    check(items.is_arr() && items.array.size() == 2, "summary + compliance items");
+    const json::Value& summary = items.array[0];
+    check_eq(summary.str_at("TypeName"), "AWS:PatchSummary", "summary type name");
+    check_eq(summary.str_at("SchemaVersion"), "1.0", "summary schema version");
+    const json::Value* content = summary.find("Content");
+    check(content && content->array.size() == 1, "summary has one content row");
+    if (content && content->array.size() == 1) {
+        const json::Value& row = content->array[0];
+        check_eq(row.str_at("MissingCount"), "1", "missing count");
+        check_eq(row.str_at("InstalledCount"), "214", "installed count");
+        check_eq(row.str_at("InstalledPendingRebootCount"), "1",
+                 "haiku package counts as pending reboot");
+        check_eq(row.str_at("OperationType"), "Install", "operation type");
+        check_eq(row.str_at("ExecutionId"), "cmd-123", "execution id");
+        // Inventory content values must all be strings.
+        for (const auto& kv : row.object)
+            check(kv.second.is_str(), "summary value is a string: " + kv.first);
+    }
+    const json::Value& compliance = items.array[1];
+    check_eq(compliance.str_at("TypeName"), "AWS:PatchCompliance", "compliance type name");
+    const json::Value* rows = compliance.find("Content");
+    check(rows && rows->array.size() == 3, "one row per patch");
+    if (rows && rows->array.size() == 3) {
+        check_eq(rows->array[0].str_at("State"), "Installed", "installed state");
+        check_eq(rows->array[1].str_at("State"), "InstalledPendingReboot",
+                 "haiku package pending reboot state");
+        check_eq(rows->array[2].str_at("State"), "Missing", "missing state");
+        check_eq(rows->array[2].str_at("KBId"), "ncurses6", "KBId is the package name");
+        check_eq(rows->array[2].str_at("Title"), "ncurses6-6.4-1", "title is name-version");
+    }
+
+    // After a clean install, compliance content must still be present (an
+    // empty array clears stale Missing rows server-side).
+    r.installed.clear();
+    r.missing.clear();
+    items = patch::inventory_items(r, "2026-08-29T01:05:00Z");
+    const json::Value* empty_rows = items.array[1].find("Content");
+    check(empty_rows && empty_rows->is_arr() && empty_rows->array.empty(),
+          "empty compliance content still sent");
+}
+
+void test_precondition_skip() {
+    std::printf("runner: schema-2.2 precondition\n");
+    std::string err;
+    json::Value doc = json::parse(R"({
+        "schemaVersion": "2.2",
+        "mainSteps": [
+            {"action": "aws:runPowerShellScript", "name": "PatchWindows",
+             "precondition": {"StringEquals": ["platformType", "Windows"]},
+             "inputs": {"runCommand": ["exit 1"]}},
+            {"action": "aws:runShellScript", "name": "PatchLinux",
+             "precondition": {"StringEquals": ["platformType", "Linux"]},
+             "inputs": {"runCommand": ["echo patched"]}}
+        ]})", &err);
+    check(err.empty(), "precondition doc parses: " + err);
+
+    runner::DocumentOutcome out = runner::run_document(doc, json::Value());
+    check_eq(out.status, "Success", "windows step skipped, linux step ran");
+    check(out.steps.size() == 2, "both steps reported");
+    if (out.steps.size() == 2) {
+        check_eq(out.steps[0].status, "Skipped", "windows step status");
+        check_eq(out.steps[1].status, "Success", "linux step status");
+        check(out.steps[1].standard_output.find("patched") != std::string::npos,
+              "linux step actually executed");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -398,6 +541,9 @@ int main() {
     test_cancellation();
     test_full_capture();
     test_sha256_file();
+    test_patch_parsing();
+    test_patch_params_and_inventory();
+    test_precondition_skip();
 
     std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

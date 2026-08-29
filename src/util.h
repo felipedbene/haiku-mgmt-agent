@@ -27,6 +27,9 @@ std::string amz_datestamp(int64_t epoch);
 std::string iso8601(int64_t epoch_ms);
 // SSM RunID: yyyy-MM-ddTHH-mm-ss.fffZ            (agent/times/times.go ToIsoDashUTC)
 std::string iso_dash(int64_t epoch_ms);
+// Inventory CaptureTime: yyyy-MM-ddTHH:mm:ssZ -- PutInventory rejects
+// fractional seconds, unlike the SSM reply timestamps above.
+std::string iso8601_seconds(int64_t epoch);
 
 int64_t now_epoch();
 int64_t now_epoch_ms();

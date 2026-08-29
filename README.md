@@ -8,6 +8,20 @@ console or CLI.
 Companion to [`haiku-graviton`](https://github.com/felipedbene/Haiku-Graviton) and
 [`haiku-on-ec2`](https://github.com/felipedbene/haiku-on-ec2).
 
+## Status: Phase 3 — Patch Manager (v0.3.0, host-validated; live gates pending)
+
+- **F5 — Patch Manager**: `AWS-RunPatchBaseline` (and the association variant) is
+  intercepted by name and implemented natively on `pkgman` — the stock document's
+  Linux step is a Python/yum payload that cannot run here. `Operation=Scan` lists
+  available updates as Missing patches; `Operation=Install` runs `pkgman update -y`.
+  Both report compliance via `PutInventory` (`AWS:PatchSummary` +
+  `AWS:PatchCompliance`), which populates the Patch Manager dashboard and
+  `describe-instance-patch-states`. The agent never reboots the node; a `haiku`
+  system-package update is reported as `InstalledPendingReboot`. On-box:
+  `haiku-mgmt-agent patch scan|install [--no-report]`.
+- Schema-2.2 `precondition` steps for other platforms now report `Skipped`
+  instead of failing the document.
+
 ## Status: Phase 2 — fleet features on top of the proven Phase 1 MVP
 
 Phase 2 (this tree, v0.2.0) adds, per [`docs/design-roadmap.md`](docs/design-roadmap.md):

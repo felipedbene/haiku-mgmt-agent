@@ -1,5 +1,31 @@
 # Testing — haiku-mgmt-agent
 
+## Phase 3 (v0.3.0, `phase3-patch-manager`) — host-validated, live gates PENDING
+
+**Date:** 2026-08-29. Host-side: 163/163 unit checks pass (`make check`),
+including the new pkgman-transaction parser, patch params/inventory-item
+builders, and the schema-2.2 precondition skip; `main`, `selfupdate` and
+`timesync` compile warning-free.
+
+Live gates for F5 (need a Haiku node + the usual human authorization; see the
+F5 *Verify* block in `docs/design-roadmap.md`):
+
+| Gate | Result |
+|---|---|
+| `patch scan` on-box CLI: readable list, PutInventory accepted | PENDING |
+| `send-command --document-name AWS-RunPatchBaseline` Operation=Scan | PENDING |
+| Operation=Install applies updates; re-scan shows Missing→0 | PENDING |
+| `describe-instance-patch-states` reflects the reported counts | PENDING |
+| pkgman transaction phrasing matches `parse_pkgman_transaction` vectors | PENDING |
+| Cancel mid-install: process group killed, step `Cancelled` | PENDING |
+
+Known risk to check first on hardware: the exact wording of pkgman's
+transaction listing (the parser tolerates both "to <ver>" and "to version
+<ver>" plus "from repository <name>" tails) and whether PutInventory accepts
+the `AWS:PatchSummary`/`AWS:PatchCompliance` 1.0 attribute sets as built in
+`patch::inventory_items` — both are unit-tested against assumptions, not
+against the live service yet.
+
 ## Phase 2 (v0.2.0) verification state
 
 **Date:** 2026-08-29. Host-side: 100/100 unit checks pass (`make check`),

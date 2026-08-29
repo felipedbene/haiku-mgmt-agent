@@ -299,4 +299,12 @@ http::Response fail_message(const std::string& region, const Credentials& creds,
     return call("ec2messages", kMdsTargetPrefix, "FailMessage", region, creds, json::dump(b));
 }
 
+http::Response put_inventory(const std::string& region, const Credentials& creds,
+                             const std::string& instance_id, const json::Value& items) {
+    json::Value b = json::obj();
+    b.object["InstanceId"] = json::str(instance_id);
+    b.object["Items"] = items;
+    return call("ssm", kSsmTargetPrefix, "PutInventory", region, creds, json::dump(b));
+}
+
 }  // namespace aws

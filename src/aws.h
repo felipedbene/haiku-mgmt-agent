@@ -109,4 +109,9 @@ http::Response send_reply(const std::string& region, const Credentials& creds,
 http::Response fail_message(const std::string& region, const Credentials& creds,
                             const std::string& message_id, const std::string& failure_type);
 
+// PutInventory with pre-built typed items (F5: AWS:PatchSummary and
+// AWS:PatchCompliance, which populate the Patch Manager dashboard).
+http::Response put_inventory(const std::string& region, const Credentials& creds,
+                             const std::string& instance_id, const json::Value& items);
+
 }  // namespace aws

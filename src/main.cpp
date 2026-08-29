@@ -32,6 +32,7 @@
 #include "http.h"
 #include "json.h"
 #include "log.h"
+#include "patch.h"
 #include "runner.h"
 #include "s3.h"
 #include "selfupdate.h"
@@ -41,7 +42,7 @@
 namespace {
 
 const char* kAgentName = "haiku-mgmt-agent";
-const char* kAgentVersion = "0.2.1";
+const char* kAgentVersion = "0.3.0";
 const char* kDefaultLogPath = "/var/log/haiku-mgmt-agent.log";
 const char* kLaunchJob = "x-vnd.haiku-mgmt-agent";
 const char* kDefaultBinaryPath = "/boot/system/non-packaged/bin/haiku-mgmt-agent";
@@ -105,6 +106,9 @@ void usage() {
         "subcommands (use the instance role via IMDS):\n"
         "  s3 cp <local> s3://bucket/key    upload a file\n"
         "  s3 cp s3://bucket/key <local>    download a file\n"
+        "  patch scan|install [--no-report]\n"
+        "                         run the Patch Manager operation now (pkgman-backed);\n"
+        "                         --no-report skips the PutInventory compliance upload\n"
         "  self-update --manifest URI [--restart]\n"
         "                         check the manifest now; install a newer version;\n"
         "                         with --restart, restart the launch_daemon service after\n",
@@ -328,15 +332,30 @@ struct Agent {
         const json::Value parameters = params ? *params : json::Value();
         const std::string s3_bucket = payload.str_at("OutputS3BucketName");
         const std::string s3_prefix = payload.str_at("OutputS3KeyPrefix");
+        const std::string document_name = payload.str_at("DocumentName");
 
         std::shared_ptr<exec::Cancel> token = inflight.add(command_id);
         std::thread worker([this, message_id, command_id, document, parameters, s3_bucket,
-                            s3_prefix, token]() {
+                            s3_prefix, document_name, token]() {
             runner::Options opts;
             opts.cancel = token.get();
             if (!s3_bucket.empty()) opts.max_capture = kS3CaptureBytes;
 
-            runner::DocumentOutcome outcome = runner::run_document(document, parameters, opts);
+            runner::DocumentOutcome outcome;
+            if (patch::is_patch_document(document_name)) {
+                // F5: the stock document's Linux step is a Python payload that
+                // drives yum/apt; neither exists here. Run the equivalent
+                // pkgman operation natively instead of executing the steps.
+                patch::Context pctx;
+                pctx.creds = creds;
+                pctx.region = id.region;
+                pctx.instance_id = id.instance_id;
+                pctx.command_id = command_id;
+                pctx.cancel = token.get();
+                outcome = patch::run_baseline(pctx, parameters);
+            } else {
+                outcome = runner::run_document(document, parameters, opts);
+            }
             upload_outputs(command_id, s3_bucket, s3_prefix, outcome);
             send_reply(message_id,
                        runner::reply_payload(info, outcome.status, outcome.trace, outcome.steps),
@@ -509,6 +528,49 @@ int cmd_s3(int argc, char** argv) {
     return 0;
 }
 
+// F5, manual: `patch scan|install [--no-report]` -- the same code path a
+// console-issued AWS-RunPatchBaseline takes, runnable on the box for testing.
+int cmd_patch(int argc, char** argv) {
+    std::string operation;
+    bool report = true;
+    for (int i = 2; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--no-report") { report = false; continue; }
+        if (operation.empty() && (a == "scan" || a == "install")) { operation = a; continue; }
+        std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
+        operation.clear();
+        break;
+    }
+    if (operation.empty()) {
+        std::fprintf(stderr, "usage: %s patch scan|install [--no-report]\n", kAgentName);
+        return 2;
+    }
+
+    Agent agent;
+    aws::CredentialProvider provider(&agent.imds);
+    if (!cli_bootstrap(agent, provider)) return 1;
+
+    json::Value params = json::obj();
+    params.object["Operation"] = json::str(operation);
+    // The agent never reboots the instance, so the CLI declares NoReboot.
+    params.object["RebootOption"] = json::str("NoReboot");
+
+    patch::Context ctx;
+    ctx.creds = &provider;
+    ctx.region = agent.id.region;
+    ctx.instance_id = agent.id.instance_id;
+    ctx.command_id = util::uuid4();
+    ctx.report_inventory = report;
+
+    runner::DocumentOutcome outcome = patch::run_baseline(ctx, params);
+    for (const runner::StepResult& sr : outcome.steps) {
+        if (!sr.full_stdout.empty()) std::fputs(sr.full_stdout.c_str(), stdout);
+        if (!sr.full_stderr.empty()) std::fputs(sr.full_stderr.c_str(), stderr);
+    }
+    std::printf("%s\n", outcome.status.c_str());
+    return outcome.status == "Success" ? 0 : 1;
+}
+
 // F3, manual: `self-update --manifest URI [--restart]`.
 int cmd_self_update(int argc, char** argv) {
     std::string manifest, binary_path = kDefaultBinaryPath;
@@ -559,6 +621,7 @@ int cmd_self_update(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "s3") == 0) return cmd_s3(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "patch") == 0) return cmd_patch(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "self-update") == 0) return cmd_self_update(argc, argv);
 
     Options opt;

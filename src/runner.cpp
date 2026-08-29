@@ -83,6 +83,39 @@ std::vector<std::string> command_lines(const json::Value& inputs) {
     return lines;
 }
 
+// Schema-2.2 precondition: {"StringEquals": ["platformType", "Linux"]}. We
+// present platformType Linux (the enum has no Haiku), so cross-platform
+// documents' Windows/MacOS steps must be skipped, not failed. Returns false
+// (do not skip) when the precondition is absent or has a shape we cannot
+// evaluate: a visible failure beats a silent skip.
+bool precondition_excludes_step(const json::Value& precondition) {
+    if (!precondition.is_obj()) return false;
+    const json::Value* eq = precondition.find("StringEquals");
+    if (!eq || !eq->is_arr() || eq->array.size() != 2) return false;
+    std::string var = util::lower(util::trim(eq->array[0].str()));
+    std::string val = util::lower(util::trim(eq->array[1].str()));
+    if (val == "platformtype") std::swap(var, val);
+    if (var != "platformtype" && var != "{{platformtype}}" && var != "{{ platformtype }}")
+        return false;
+    return val != "linux";
+}
+
+StepResult skipped(const std::string& plugin_id, const std::string& action,
+                   const std::string& start_time) {
+    StepResult sr;
+    sr.plugin_id = plugin_id;
+    sr.action = action;
+    sr.status = "Skipped";
+    sr.code = 0;
+    sr.output = "Step execution skipped due to unsatisfied preconditions: '\"StringEquals\": [platformType, Linux]'.";
+    sr.standard_output = sr.output;
+    sr.start_time = start_time;
+    sr.end_time = util::iso8601(util::now_epoch_ms());
+    logging::logf(logging::Info, "step %s skipped: precondition excludes this platform",
+                  plugin_id.c_str());
+    return sr;
+}
+
 StepResult unsupported(const std::string& plugin_id, const std::string& action,
                        const std::string& start_time) {
     StepResult sr;
@@ -176,6 +209,7 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
         std::string plugin_id;
         std::string action;
         json::Value inputs;
+        json::Value precondition;
     };
     std::vector<Step> steps;
 
@@ -187,6 +221,8 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
             st.plugin_id = s.str_at("name", st.action);
             const json::Value* in = s.find("inputs");
             if (in) st.inputs = *in;
+            const json::Value* pre = s.find("precondition");
+            if (pre) st.precondition = *pre;
             steps.push_back(st);
         }
     } else if (const json::Value* rc = document_content.find("runtimeConfig")) {
@@ -215,6 +251,12 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
 
     for (const Step& st : steps) {
         const std::string start_time = util::iso8601(util::now_epoch_ms());
+
+        if (precondition_excludes_step(st.precondition)) {
+            // Skipped steps never change the document status.
+            outcome.steps.push_back(skipped(st.plugin_id, st.action, start_time));
+            continue;
+        }
 
         if (st.action != kRunShellScript) {
             outcome.steps.push_back(unsupported(st.plugin_id, st.action, start_time));
