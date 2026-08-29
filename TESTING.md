@@ -26,6 +26,27 @@ The MGS wire format (binary `AgentMessage`, signed WS upgrade, handshake) is
 unit-tested against the documented Go-agent layout, not yet against the live
 service; the pty layer is the single largest unknown.
 
+**Live battle-test 2026-08-29 (issue #2, commit cd92680, c7g.large, native
+Haiku build).** F5 Patch Manager PASSED live end to end — `AWS-RunPatchBaseline`
+Scan/Install intercepted, `PutInventory` accepted (`AWS:PatchSummary` visible via
+`list-inventory-entries`), and the parser matched real pkgman phrasing
+(`upgrade package sed-4.9_bootstrap-1 to 4.9-1 from repository DeBeOS`). Run
+Command with the control channel concurrently open, and CancelCommand, also
+PASSED. **F6 FAILED (pty unreachable)** on two live-wire divergences the
+host tests missed because they used the documented layout, not the live bytes:
+1. the live `interactive_shell` envelope uses a **lowercase `content`** key
+   (Go's `json` is case-insensitive; our parser was not) → inner parse failed,
+   no shell;
+2. `mgs::deserialize` **verified the inbound payload digest and sliced payload by
+   PayloadLength**; the reference Go agent does neither (it takes
+   `input[HeaderLength+4:]` and never checks the digest), and the live service's
+   digest for the HandshakeResponse didn't match our computation → the handshake
+   was silently dropped and the pty never forked.
+
+Both fixed and regression-tested (216/216 host checks). The pty layer itself
+(`posix_openpt` et al., echo, resize, exit) is **still UNVERIFIED** — it was
+unreachable until the handshake completes, so F6 needs a re-run on hardware.
+
 ## Phase 3 (v0.3.0) — Patch Manager, host-validated, live gates PENDING
 
 Live gates for F5 (need a Haiku node + the usual human authorization; see the

@@ -147,20 +147,19 @@ bool deserialize(const std::string& raw, AgentMessage& out, std::string& err) {
         uuid_from_wire(reinterpret_cast<const unsigned char*>(raw.data() + kUuidOffset));
     out.payload_type = get_u32(raw, kPayloadTypeOffset);
 
-    const size_t payload_len_at = header_len;  // PayloadLength sits right after the header
-    const uint32_t payload_len = get_u32(raw, payload_len_at);
-    const size_t payload_at = payload_len_at + 4;
-    if (raw.size() < payload_at + payload_len) {
-        err = "declared payload " + std::to_string(payload_len) + " exceeds frame";
-        return false;
-    }
-    out.payload = raw.substr(payload_at, payload_len);
-
-    const std::string digest = util::sha256_raw(out.payload);
-    if (std::memcmp(digest.data(), raw.data() + kDigestOffset, 32) != 0) {
-        err = "payload digest mismatch";
-        return false;
-    }
+    // Payload is everything after the header + the 4-byte PayloadLength field.
+    // We deliberately take the whole remainder rather than a PayloadLength-bounded
+    // slice, and we do NOT verify the payload digest here. Both match the
+    // reference Go agent's Deserialize (agentmessage.go): it sets
+    //   Payload = input[HeaderLength+4:]
+    // and never compares PayloadDigest. Verifying the digest broke real sessions
+    // on the live service (issue #2): the service's stored digest for some
+    // inbound messages, e.g. the HandshakeResponse, does not equal
+    // sha256(payload) as we compute it, so a strict check silently dropped the
+    // handshake and the pty was never spawned. TLS already protects transport
+    // integrity, which is why the reference agent trusts the payload.
+    const size_t payload_at = static_cast<size_t>(header_len) + 4;
+    out.payload = raw.substr(payload_at);
     return true;
 }
 

@@ -628,12 +628,30 @@ void test_mgs_agentmessage() {
     check_eq(back.message_id, uuid, "message id round-trip");
     check_eq(back.payload, m.payload, "payload round-trip");
 
-    // A corrupted payload must fail the digest check.
-    raw[125] = raw[125] ^ 0xFF;
-    mgs::AgentMessage bad;
-    check(!mgs::deserialize(raw, bad, err), "digest mismatch rejected");
+    // Inbound digest is intentionally NOT verified (matches the reference Go
+    // agent, which never checks PayloadDigest on Deserialize). Issue #2: the
+    // live service's stored digest for the HandshakeResponse did not equal
+    // sha256(payload) as we compute it, and a strict check dropped the handshake
+    // so the pty never spawned. A flipped payload byte must still deserialize.
+    mgs::AgentMessage flipped;
+    std::string flipped_raw = raw;
+    flipped_raw[125] = flipped_raw[125] ^ 0xFF;
+    check(mgs::deserialize(flipped_raw, flipped, err),
+          "payload byte change still deserializes (digest not verified inbound): " + err);
+    check(flipped.payload.size() == m.payload.size(), "flipped payload same length");
+    check_eq(flipped.payload.substr(6), m.payload.substr(6),
+             "payload past the flipped byte (index 5) round-trips");
 
-    // A truncated frame is rejected, not read out of bounds.
+    // Payload is the whole remainder after the header (input[HeaderLength+4:]),
+    // matching the Go agent, so trailing bytes beyond a (smaller) PayloadLength
+    // field are still delivered rather than truncated.
+    mgs::AgentMessage rem;
+    std::string with_trailer = raw + "EXTRA";
+    check(mgs::deserialize(with_trailer, rem, err), "frame with trailer deserializes: " + err);
+    check_eq(rem.payload, m.payload + "EXTRA", "payload takes the full remainder");
+
+    // A truncated frame (shorter than the header) is still rejected.
+    mgs::AgentMessage bad;
     check(!mgs::deserialize(raw.substr(0, 50), bad, err), "short frame rejected");
 }
 
@@ -655,6 +673,18 @@ void test_session_parsing() {
     check_eq(sr.session_type, "Standard_Stream", "session type");
     check_eq(sr.shell_commands, "echo hi", "shell profile commands");
     check(!sr.run_as_enabled, "runAs disabled");
+
+    // Issue #2 regression: the LIVE MGS envelope uses a lowercase "content"
+    // key (Go's json is case-insensitive; ours is not). Must parse the same.
+    json::Value live_env = json::obj();
+    live_env.object["schemaVersion"] = json::num(1);
+    live_env.object["taskId"] = json::str("t-1");
+    live_env.object["topic"] = json::str("test_topic");
+    live_env.object["content"] = json::str(inner);
+    session::StartRequest live = session::parse_start_request(json::dump(live_env));
+    check(live.error.empty(), "lowercase 'content' envelope parses: " + live.error);
+    check_eq(live.session_id, "user-0abc", "session id from lowercase-content envelope");
+    check_eq(live.session_type, "Standard_Stream", "session type from lowercase-content envelope");
 
     session::StartRequest bad = session::parse_start_request("not json");
     check(!bad.error.empty(), "garbage payload rejected");

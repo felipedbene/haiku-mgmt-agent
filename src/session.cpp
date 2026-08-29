@@ -411,8 +411,13 @@ StartRequest parse_start_request(const std::string& mgs_payload) {
         sr.error = "interactive_shell payload is not JSON: " + err;
         return sr;
     }
-    // The real AgentTaskPayload is a *stringified* JSON in "Content".
-    const std::string inner = envelope.str_at("Content");
+    // The real AgentTaskPayload is a *stringified* JSON in the envelope's
+    // content field. The live MGS service sends a lowercase "content" key; the
+    // Go agent tolerates this because encoding/json matches keys
+    // case-insensitively, but our parser is case-sensitive, so check both
+    // (issue #2: with only "Content" the inner parse failed and no shell spawned).
+    std::string inner = envelope.str_at("content");
+    if (inner.empty()) inner = envelope.str_at("Content");
     json::Value task = json::parse(inner, &err);
     if (!err.empty() || !task.is_obj()) {
         sr.error = "interactive_shell Content is not JSON: " + err;
