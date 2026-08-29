@@ -38,8 +38,9 @@ struct Update {
 
 // ---- pure helpers, host-testable (make check) ----
 
-// Splits "openssl3-3.0.16-1" into name ("openssl3") and version ("3.0.16-1").
-// The version starts at the first '-' that is followed by a digit.
+// Splits "openssl3-3.0.16-1" into name ("openssl3") and version ("3.0.16-1")
+// at the first '-'. Haiku package names never contain '-' (underscores by
+// convention), so the first dash always separates name from version.
 void split_name_version(const std::string& s, std::string& name, std::string& version);
 
 // Parses the "The following changes will be made:" block of pkgman output.

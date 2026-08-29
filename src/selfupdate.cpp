@@ -186,6 +186,11 @@ Outcome check_and_apply(aws::CredentialProvider& creds, const std::string& regio
         detail = "swapped binary at " + binary_path + " (previous kept as .old)";
     }
 
+    // Remove the staged download so repeated upgrades do not leak artifacts into
+    // /tmp (only the checksum-mismatch path unlinked before). Harmless ENOENT
+    // when the raw-binary path already renamed it into place.
+    ::unlink(artifact.c_str());
+
     logging::logf(logging::Info, "self-update: %s", detail.c_str());
     return Outcome::Updated;
 }

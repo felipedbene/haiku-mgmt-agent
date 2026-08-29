@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <thread>
 
 #include "http.h"
@@ -33,6 +34,11 @@ constexpr int kHandshakeTimeoutSeconds = 20;
 constexpr size_t kPtyReadChunk = 8192;
 
 std::atomic<uint64_t> g_seq_seed{0};
+
+// Live interactive sessions, so shutdown can wait for their detached worker
+// threads to finish before main() tears down the shared credential provider
+// (a session thread captures pointers into main's stack).
+std::atomic<int> g_active_sessions{0};
 
 // One outbound stream-data message: masked binary AgentMessage with an
 // incrementing per-channel sequence number (SendStreamDataMessage).
@@ -154,8 +160,14 @@ void set_pty_size(int master, uint32_t cols, uint32_t rows) {
 #endif
 }
 
+// Decrements the live-session count when a session worker returns by any path.
+struct SessionGuard {
+    ~SessionGuard() { g_active_sessions.fetch_sub(1); }
+};
+
 // One interactive session: data channel + pty bridge. Runs on its own thread.
 void run_session(const Options& opts, const StartRequest& sr) {
+    SessionGuard guard;  // paired with the increment in run() before the spawn
     logging::logf(logging::Info, "session %s: starting (type=%s)", sr.session_id.c_str(),
                   sr.session_type.c_str());
 
@@ -224,6 +236,11 @@ void run_session(const Options& opts, const StartRequest& sr) {
 
     // Wait for the HandshakeResponse before spawning the shell.
     bool handshake_done = false;
+    // The HandshakeResponse is itself an inbound stream-data message and shares
+    // the ExpectedSequenceNumber space with subsequent keystrokes. We must carry
+    // its sequence forward, or the first real input frame is rejected as
+    // out-of-order and every keystroke after it is dropped.
+    int64_t handshake_seq = -1;
     const int64_t hs_deadline = util::now_epoch() + kHandshakeTimeoutSeconds;
     while (!handshake_done && (!opts.stop || !opts.stop->load())) {
         if (util::now_epoch() > hs_deadline) {
@@ -250,6 +267,7 @@ void run_session(const Options& opts, const StartRequest& sr) {
                               sr.session_id.c_str(), herr.c_str());
                 return;
             }
+            handshake_seq = m.sequence;
             handshake_done = true;
         } else if (m.message_type == mgs::kMsgChannelClosed) {
             return;
@@ -279,7 +297,9 @@ void run_session(const Options& opts, const StartRequest& sr) {
                   static_cast<int>(pty.pid));
 
     ::fcntl(pty.master, F_SETFL, O_NONBLOCK);
-    int64_t next_expected = 0;  // ExpectedSequenceNumber for inbound stream data
+    // Continue the inbound sequence after the handshake response (seq 0 in
+    // practice, since it is the first inbound stream-data message).
+    int64_t next_expected = handshake_seq + 1;
     bool running = true;
     while (running && (!opts.stop || !opts.stop->load())) {
         // 1. Drain all currently-available pty output to the customer, so a
@@ -510,6 +530,7 @@ bool run(const Options& opts) {
     ws.set_recv_timeout(kControlRecvPollMs);
     logging::info("control channel open; waiting for sessions");
 
+    std::set<std::string> seen_sessions;  // dedup StartSession redeliveries
     int64_t next_ping = util::now_epoch() + kPingIntervalSeconds;
     while (!opts.stop || !opts.stop->load()) {
         if (util::now_epoch() >= next_ping) {
@@ -555,6 +576,15 @@ bool run(const Options& opts) {
                               sr.session_id.c_str());
                 continue;
             }
+            // MGS redelivers an unacknowledged control message; dedup by
+            // SessionId so a redelivery storm cannot spawn a second pty/shell
+            // for the same session (mirrors Run Command's CommandId dedup).
+            if (!seen_sessions.insert(sr.session_id).second) {
+                logging::logf(logging::Info, "session %s: duplicate StartSession; ignoring",
+                              sr.session_id.c_str());
+                continue;
+            }
+            g_active_sessions.fetch_add(1);  // paired with SessionGuard in run_session
             std::thread(run_session, opts, sr).detach();
         } else if (m.message_type == mgs::kMsgChannelClosed) {
             logging::info("control channel: server requested close");
@@ -566,6 +596,16 @@ bool run(const Options& opts) {
         }
     }
     ws.close();
+
+    // Shutdown (opts.stop set): wait for detached session workers to finish
+    // before returning, so main() does not free the credential provider they
+    // still hold. Sessions notice opts.stop within one data-channel poll (~1 s);
+    // bound the wait so a wedged pty cannot hang shutdown forever.
+    const int64_t drain_deadline = util::now_epoch() + 15;
+    while (g_active_sessions.load() > 0 && util::now_epoch() < drain_deadline) ::usleep(100000);
+    if (g_active_sessions.load() > 0)
+        logging::logf(logging::Warn, "%d session(s) still active at shutdown drain timeout",
+                      g_active_sessions.load());
     return true;
 }
 

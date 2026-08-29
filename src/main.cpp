@@ -250,29 +250,34 @@ struct Agent {
             std::string key_prefix;
             if (!prefix.empty()) key_prefix = prefix + "/";
             key_prefix += command_id + "/" + id.instance_id + "/awsrunShellScript/" + sr.plugin_id;
-            bool any = false, all_ok = true;
+            bool any_ok = false, any_failed = false;
             const std::pair<const char*, const std::string*> streams[] = {
                 {"stdout", &sr.full_stdout},
                 {"stderr", &sr.full_stderr},
             };
             for (const auto& s : streams) {
                 if (s.second->empty()) continue;
-                any = true;
                 http::Response r = s3::put(*creds, id.region, bucket, key_prefix + "/" + s.first,
                                            "", *s.second, "text/plain");
-                if (!r.ok()) {
-                    all_ok = false;
+                if (r.ok()) {
+                    any_ok = true;
+                } else {
+                    any_failed = true;
                     logging::logf(logging::Warn,
                                   "S3 output upload failed (%s/%s/%s): status=%d error=%s %s",
                                   bucket.c_str(), key_prefix.c_str(), s.first, r.status,
                                   r.error.c_str(), util::clip(r.body, 300, "...").c_str());
                 }
             }
-            if (any && all_ok) {
+            // Reference the prefix if at least one stream landed: a partial
+            // upload (stdout ok, stderr failed) still has an object worth
+            // linking, and reporting nothing would hide it from the operator.
+            if (any_ok) {
                 sr.output_s3_bucket = bucket;
                 sr.output_s3_key_prefix = key_prefix;
-                logging::logf(logging::Info, "uploaded step %s output to s3://%s/%s",
-                              sr.plugin_id.c_str(), bucket.c_str(), key_prefix.c_str());
+                logging::logf(logging::Info, "uploaded step %s output to s3://%s/%s%s",
+                              sr.plugin_id.c_str(), bucket.c_str(), key_prefix.c_str(),
+                              any_failed ? " (partial: a stream failed)" : "");
             }
         }
     }
