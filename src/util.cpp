@@ -200,4 +200,21 @@ std::string clip(const std::string& s, size_t max, const std::string& suffix) {
     return s.substr(0, max - suffix.size()) + suffix;
 }
 
+std::string uri_encode(const std::string& s, bool keep_slash) {
+    static const char* kHex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~' || (keep_slash && c == '/')) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[c >> 4]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
 }  // namespace util

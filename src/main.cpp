@@ -145,6 +145,47 @@ struct Agent {
         return true;
     }
 
+    // Upload each step's full stdout/stderr to S3 when the command set
+    // OutputS3BucketName. Mirrors the SSM key layout so the console's "Output on
+    // S3" links resolve: <prefix>/<command-id>/<instance-id>/awsrunShellScript/
+    // <plugin>/{stdout,stderr}. Best-effort: an upload failure is logged and the
+    // inline (clipped) output still ships. Rewrites each step's s3_key_prefix to
+    // the actual per-step directory so the reply points at the objects.
+    void upload_step_outputs(runner::DocumentOutcome& outcome, const std::string& command_id) {
+        aws::Credentials c;
+        bool have_creds = creds->get(c);
+        for (runner::StepResult& s : outcome.steps) {
+            if (s.s3_bucket.empty()) continue;
+            if (!have_creds) {
+                logging::warn("S3 output requested but no credentials; skipping upload");
+                return;
+            }
+            std::string prefix = s.s3_key_prefix;
+            while (!prefix.empty() && prefix.back() == '/') prefix.pop_back();
+            const std::string dir = (prefix.empty() ? "" : prefix + "/") + command_id + "/" +
+                                    id.instance_id + "/awsrunShellScript/" + s.plugin_id;
+
+            auto put = [&](const std::string& name, const std::string& data) {
+                http::Response r = aws::s3_put_object(id.region, c, s.s3_bucket, dir + "/" + name, data);
+                if (!r.ok()) {
+                    check_auth_failure(r, "S3 PutObject");
+                    logging::logf(logging::Warn, "S3 upload of %s/%s failed: status=%d error=%s",
+                                  s.s3_bucket.c_str(), (dir + "/" + name).c_str(), r.status,
+                                  r.error.c_str());
+                    return false;
+                }
+                logging::logf(logging::Info, "uploaded %s to s3://%s/%s/%s (%zuB)", name.c_str(),
+                              s.s3_bucket.c_str(), dir.c_str(), name.c_str(), data.size());
+                return true;
+            };
+
+            bool ok = put("stdout", s.full_stdout);
+            if (!s.full_stderr.empty()) ok = put("stderr", s.full_stderr) && ok;
+            // Report the S3 location only for what actually landed.
+            s.s3_key_prefix = ok ? dir : "";
+        }
+    }
+
     bool send_reply(const std::string& message_id, const std::string& payload, const char* what) {
         aws::Credentials c;
         if (!creds->get(c)) return false;
@@ -215,6 +256,7 @@ struct Agent {
         }
 
         runner::DocumentOutcome outcome = runner::run_document(*doc, params ? *params : empty);
+        upload_step_outputs(outcome, command_id);
         send_reply(message_id, runner::reply_payload(info, outcome.status, outcome.trace, outcome.steps),
                    "SendReply(final)");
         logging::logf(logging::Info, "command %s completed: %s", command_id.c_str(),

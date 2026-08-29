@@ -238,6 +238,77 @@ http::Response call(const std::string& service, const std::string& target_prefix
     return http::perform(req);
 }
 
+http::Response s3_put_object(const std::string& region, const Credentials& creds,
+                             const std::string& bucket, const std::string& key,
+                             const std::string& body, const std::string& content_type,
+                             int timeout_ms) {
+    http::Response bad;
+    if (creds.empty()) {
+        bad.error = "no credentials available";
+        return bad;
+    }
+    if (bucket.empty() || key.empty()) {
+        bad.error = "s3 put: empty bucket or key";
+        return bad;
+    }
+
+    const std::string service = "s3";
+    const std::string host = bucket + ".s3." + region + ".amazonaws.com";
+    // Canonical URI: each path segment percent-encoded, '/' preserved.
+    const std::string canonical_uri = "/" + util::uri_encode(key, /*keep_slash=*/true);
+    const int64_t now = util::now_epoch();
+    const std::string amzdate = util::amz_date(now);
+    const std::string datestamp = util::amz_datestamp(now);
+    // S3 signs the real content hash (not UNSIGNED-PAYLOAD); it also travels in
+    // the x-amz-content-sha256 header, which S3 requires.
+    const std::string payload_hash = util::sha256_hex(body);
+
+    std::vector<std::pair<std::string, std::string>> signed_headers = {
+        {"content-type", content_type},
+        {"host", host},
+        {"x-amz-content-sha256", payload_hash},
+        {"x-amz-date", amzdate},
+    };
+    if (!creds.token.empty()) signed_headers.push_back({"x-amz-security-token", creds.token});
+    std::sort(signed_headers.begin(), signed_headers.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::string canonical_headers, signed_names;
+    for (size_t i = 0; i < signed_headers.size(); i++) {
+        canonical_headers += signed_headers[i].first + ":" + signed_headers[i].second + "\n";
+        if (i) signed_names += ";";
+        signed_names += signed_headers[i].first;
+    }
+
+    const std::string canonical_request = "PUT\n" + canonical_uri + "\n\n" + canonical_headers +
+                                          "\n" + signed_names + "\n" + payload_hash;
+    const std::string scope = datestamp + "/" + region + "/" + service + "/aws4_request";
+    const std::string string_to_sign =
+        "AWS4-HMAC-SHA256\n" + amzdate + "\n" + scope + "\n" + util::sha256_hex(canonical_request);
+
+    const std::string signature =
+        util::to_hex(util::hmac_sha256(signing_key(creds.secret_key, datestamp, region, service),
+                                       string_to_sign));
+
+    http::Request req;
+    req.method = "PUT";
+    req.tls = true;
+    req.host = host;
+    req.path = canonical_uri;
+    req.body = body;
+    req.timeout_ms = timeout_ms;
+    req.headers.push_back({"Content-Type", content_type});
+    req.headers.push_back({"X-Amz-Content-Sha256", payload_hash});
+    req.headers.push_back({"X-Amz-Date", amzdate});
+    if (!creds.token.empty()) req.headers.push_back({"X-Amz-Security-Token", creds.token});
+    req.headers.push_back({"Authorization",
+                           "AWS4-HMAC-SHA256 Credential=" + creds.access_key + "/" + scope +
+                               ", SignedHeaders=" + signed_names + ", Signature=" + signature});
+    req.headers.push_back({"User-Agent", "haiku-mgmt-agent"});
+
+    return http::perform(req);
+}
+
 // ----------------------------------------------------------- API wrappers
 
 http::Response update_instance_information(const std::string& region, const Credentials& creds,

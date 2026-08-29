@@ -47,4 +47,8 @@ std::string lower(std::string s);
 // Truncate to `max` bytes, appending `suffix` when it had to cut.
 std::string clip(const std::string& s, size_t max, const std::string& suffix = "");
 
+// RFC 3986 percent-encoding, as SigV4 canonical URIs require. When keep_slash
+// is true, '/' is left literal (S3 object keys are a path of encoded segments).
+std::string uri_encode(const std::string& s, bool keep_slash = false);
+
 }  // namespace util

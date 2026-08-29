@@ -241,6 +241,20 @@ void test_time_formats() {
     check(util::parse_http_date("garbage") == 0, "unparseable date reports 0");
 }
 
+void test_uri_encode() {
+    std::printf("uri encode\n");
+    // RFC 3986 unreserved set is left literal; everything else is percent-encoded.
+    check_eq(util::uri_encode("abc"), "abc", "unreserved untouched");
+    check_eq(util::uri_encode("a b"), "a%20b", "space encoded");
+    check_eq(util::uri_encode("-_.~"), "-_.~", "unreserved marks");
+    check_eq(util::uri_encode("k=v&x"), "k%3Dv%26x", "reserved encoded");
+    // S3 object keys are a path of encoded segments: '/' stays literal.
+    check_eq(util::uri_encode("a/b", false), "a%2Fb", "slash encoded by default");
+    check_eq(util::uri_encode("a/b", true), "a/b", "slash kept for S3 canonical URI");
+    check_eq(util::uri_encode("logs/cmd-1/i-0/awsrunShellScript/p/stdout", true),
+             "logs/cmd-1/i-0/awsrunShellScript/p/stdout", "s3 output key path");
+}
+
 }  // namespace
 
 int main() {
@@ -256,6 +270,7 @@ int main() {
     test_message_id_parsing();
     test_uuid();
     test_time_formats();
+    test_uri_encode();
 
     std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

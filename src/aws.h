@@ -80,6 +80,16 @@ http::Response call(const std::string& service, const std::string& target_prefix
                     const std::string& operation, const std::string& region,
                     const Credentials& creds, const std::string& body, int timeout_ms = 25000);
 
+// PUT an object into S3 (virtual-hosted-style, SigV4 with signing name "s3" and
+// a real payload hash). Used to upload full command stdout/stderr when a command
+// sets OutputS3BucketName -- inline replies are capped at 24000 bytes, which is
+// far too small for a build log. `key` is the object key without a leading '/'.
+http::Response s3_put_object(const std::string& region, const Credentials& creds,
+                             const std::string& bucket, const std::string& key,
+                             const std::string& body,
+                             const std::string& content_type = "text/plain; charset=utf-8",
+                             int timeout_ms = 25000);
+
 // Exposed for unit testing against the AWS SigV4 test vectors.
 std::string signing_key(const std::string& secret, const std::string& datestamp,
                         const std::string& region, const std::string& service);

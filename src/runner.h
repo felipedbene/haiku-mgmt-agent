@@ -31,6 +31,15 @@ struct StepResult {
     std::string standard_error;
     std::string start_time;
     std::string end_time;
+
+    // S3 command output (filled when the step's inputs set outputS3BucketName).
+    // full_* hold the un-clipped capture (bounded, see kMaxS3CaptureBytes) so the
+    // caller can upload the complete log; the inline standard_* stay clipped.
+    std::string full_stdout;
+    std::string full_stderr;
+    std::string s3_bucket;      // OutputS3BucketName, empty => no S3 upload
+    std::string s3_key_prefix;  // reported in the reply; the uploader sets the
+                                // full per-step prefix once the objects are PUT.
 };
 
 struct DocumentOutcome {

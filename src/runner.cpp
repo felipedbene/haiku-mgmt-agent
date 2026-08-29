@@ -13,6 +13,11 @@ namespace {
 
 constexpr size_t kMaxPluginOutputSize = 2500;   // iohandler.go:33
 constexpr size_t kMaxStdoutLength = 24000;      // appconfig/constants.go:241
+// When a command requests S3 output we capture far more than the inline cap so
+// the uploaded log is complete. Bounded (in-memory) rather than streamed: a v0.2
+// simplification -- 5 MiB covers a long build log; larger output is truncated
+// with the usual marker and noted.
+constexpr size_t kMaxS3CaptureBytes = 5 * 1024 * 1024;
 constexpr const char* kErrTitle = "\n----------ERROR-------\n";
 constexpr const char* kTruncateOut = "\n---Output truncated---";
 constexpr const char* kTruncateError = "\n---Error truncated----";
@@ -242,10 +247,18 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
         const int timeout = static_cast<int>(inputs.num_at("timeoutSeconds", 3600));
         const std::string workdir = inputs.str_at("workingDirectory");
 
+        // OutputS3BucketName/KeyPrefix: when the command asks for S3 output, keep
+        // the full capture so the uploader (which has the command/instance ids
+        // and credentials) can PUT the complete log; the inline reply stays
+        // clipped as before.
+        const std::string s3_bucket = inputs.str_at("outputS3BucketName");
+        const std::string s3_key_prefix = inputs.str_at("outputS3KeyPrefix");
+        const size_t capture = s3_bucket.empty() ? kMaxStdoutLength : kMaxS3CaptureBytes;
+
         logging::logf(logging::Info, "running step %s (%s), timeout=%ds, %zu line(s)",
                       st.plugin_id.c_str(), st.action.c_str(), timeout, lines.size());
 
-        exec::Result er = exec::run_shell(script, timeout, workdir, kMaxStdoutLength);
+        exec::Result er = exec::run_shell(script, timeout, workdir, capture);
 
         StepResult sr;
         sr.plugin_id = st.plugin_id;
@@ -255,6 +268,13 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
         sr.standard_output = util::clip(er.stdout_data, kMaxStdoutLength);
         sr.standard_error = util::clip(er.stderr_data, kMaxStdoutLength);
         sr.code = er.exit_code;
+        if (!s3_bucket.empty()) {
+            sr.s3_bucket = s3_bucket;
+            sr.s3_key_prefix = s3_key_prefix;  // the uploader extends this to the
+                                               // full per-step prefix after PUT.
+            sr.full_stdout = er.stdout_data;
+            sr.full_stderr = er.stderr_data;
+        }
 
         if (!er.error.empty()) {
             sr.status = "Failed";
@@ -312,8 +332,8 @@ std::string reply_payload(const AgentInfo& agent, const std::string& document_st
         st.object["output"] = json::str(s.output);
         st.object["startDateTime"] = json::str(s.start_time);
         st.object["endDateTime"] = json::str(s.end_time);
-        st.object["outputS3BucketName"] = json::str("");
-        st.object["outputS3KeyPrefix"] = json::str("");
+        st.object["outputS3BucketName"] = json::str(s.s3_bucket);
+        st.object["outputS3KeyPrefix"] = json::str(s.s3_key_prefix);
         st.object["stepName"] = json::str(s.plugin_id);
         st.object["standardOutput"] = json::str(s.standard_output);
         st.object["standardError"] = json::str(s.standard_error);
