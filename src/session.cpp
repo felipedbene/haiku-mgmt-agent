@@ -30,6 +30,10 @@ constexpr int kControlRecvPollMs = 1000;    // wake to check *stop and send ping
 constexpr int kDataRecvPollMs = 200;
 constexpr int kPingIntervalSeconds = 45;    // < the 54 s the Go agent uses, safely under pong wait
 constexpr int kHandshakeTimeoutSeconds = 20;
+// Reap a session with no inbound traffic for this long (SSM's own default idle
+// session timeout is 20 min); bounds the leak when a client disconnect is never
+// relayed as channel_closed.
+constexpr int64_t kIdleTimeoutSeconds = 20 * 60;
 // A shell that produces this much output between reads still yields regularly.
 constexpr size_t kPtyReadChunk = 8192;
 
@@ -43,18 +47,45 @@ std::atomic<int> g_active_sessions{0};
 // One outbound stream-data message: masked binary AgentMessage with an
 // incrementing per-channel sequence number (SendStreamDataMessage).
 bool send_stream(ws::Client& ws, uint32_t payload_type, const std::string& data, int64_t& seq,
-                 std::string& err) {
+                 Outbox& outbox, std::string& err) {
     mgs::AgentMessage m;
     m.message_type = mgs::kMsgOutputStreamData;
     m.schema_version = 1;
     m.created_ms = static_cast<uint64_t>(util::now_epoch_ms());
-    m.sequence = seq;
-    m.flags = (seq == 0) ? 1 : 0;  // SYN on the first
+    const int64_t this_seq = seq;
+    m.sequence = this_seq;
+    m.flags = (this_seq == 0) ? 1 : 0;  // SYN on the first
     m.message_id = util::uuid4();
     m.payload_type = payload_type;
     m.payload = data;
+    const std::string frame = mgs::serialize(m);
     seq++;
-    return ws.send(ws::kOpBinary, mgs::serialize(m), err);
+    // Buffer for retransmission until the client acks this sequence: MGS drops
+    // stream-data that arrives before the peer channel is bridged, and only a
+    // resend gets it through (issue #2, third divergence).
+    outbox.add(this_seq, frame, util::now_epoch_ms());
+    return ws.send(ws::kOpBinary, frame, err);
+}
+
+// Resend the oldest unacked stream-data frame if it is due. Returns false when
+// the peer has stopped acking past the ceiling (dead client -> reap session).
+bool pump_outbox(ws::Client& ws, Outbox& outbox) {
+    bool dead = false;
+    const std::string* frame = outbox.due_resend(util::now_epoch_ms(), dead);
+    if (dead) return false;
+    if (frame) {
+        std::string err;
+        ws.send(ws::kOpBinary, *frame, err);  // best effort; a real break shows up on recv
+    }
+    return true;
+}
+
+// An inbound "acknowledge" clears buffered frames up to the acked sequence.
+void handle_ack(const mgs::AgentMessage& m, Outbox& outbox) {
+    std::string jerr;
+    json::Value v = json::parse(m.payload, &jerr);
+    if (jerr.empty() && v.is_obj())
+        outbox.ack(static_cast<int64_t>(v.num_at("AcknowledgedMessageSequenceNumber", -1)));
 }
 
 // A JSON control message on the data channel (acknowledge, agent_session_state).
@@ -224,10 +255,11 @@ void run_session(const Options& opts, const StartRequest& sr) {
     }
 
     int64_t out_seq = 0;
+    Outbox outbox;  // retransmit unacked stream-data until the client acks
     {
         json::Value props = json::obj();
         std::string hs = build_handshake_request(opts.agent_version, sr.session_type, props);
-        if (!send_stream(ws, mgs::kPayloadHandshakeRequest, hs, out_seq, err)) {
+        if (!send_stream(ws, mgs::kPayloadHandshakeRequest, hs, out_seq, outbox, err)) {
             logging::logf(logging::Error, "session %s: handshake request failed: %s",
                           sr.session_id.c_str(), err.c_str());
             return;
@@ -247,6 +279,14 @@ void run_session(const Options& opts, const StartRequest& sr) {
             logging::logf(logging::Warn, "session %s: handshake timed out", sr.session_id.c_str());
             return;
         }
+        // MGS drops the first HandshakeRequest (it arrives before the peer
+        // channel is bridged); resend it until the client acks seq 0, or the
+        // handshake never completes (issue #2, third divergence).
+        if (!pump_outbox(ws, outbox)) {
+            logging::logf(logging::Warn, "session %s: no ack for handshake; peer gone",
+                          sr.session_id.c_str());
+            return;
+        }
         ws::Frame f;
         int rc = ws.recv(f, err);
         if (rc < 0) {
@@ -258,8 +298,10 @@ void run_session(const Options& opts, const StartRequest& sr) {
         mgs::AgentMessage m;
         std::string derr;
         if (!mgs::deserialize(f.payload, m, derr)) continue;
-        if (m.message_type == mgs::kMsgInputStreamData &&
-            m.payload_type == mgs::kPayloadHandshakeResponse) {
+        if (m.message_type == mgs::kMsgAcknowledge) {
+            handle_ack(m, outbox);  // clears the buffered HandshakeRequest
+        } else if (m.message_type == mgs::kMsgInputStreamData &&
+                   m.payload_type == mgs::kPayloadHandshakeResponse) {
             send_ack(ws, m);
             std::string client_version, herr;
             if (!handshake_response_ok(m.payload, client_version, herr)) {
@@ -282,7 +324,7 @@ void run_session(const Options& opts, const StartRequest& sr) {
         json::Value done = json::obj();
         done.object["HandshakeTimeToComplete"] = json::num(0);
         done.object["CustomerMessage"] = json::str("");
-        send_stream(ws, mgs::kPayloadHandshakeComplete, json::dump(done), out_seq, err);
+        send_stream(ws, mgs::kPayloadHandshakeComplete, json::dump(done), out_seq, outbox, err);
     }
 
     Pty pty = spawn_shell(sr.shell_commands, sr.run_as_enabled, sr.run_as_user, err);
@@ -290,7 +332,7 @@ void run_session(const Options& opts, const StartRequest& sr) {
         logging::logf(logging::Error, "session %s: could not start shell: %s",
                       sr.session_id.c_str(), err.c_str());
         std::string derr;
-        send_stream(ws, mgs::kPayloadStdErr, "Failed to start shell: " + err + "\r\n", out_seq, derr);
+        send_stream(ws, mgs::kPayloadStdErr, "Failed to start shell: " + err + "\r\n", out_seq, outbox, derr);
         return;
     }
     logging::logf(logging::Info, "session %s: shell running (pid %d)", sr.session_id.c_str(),
@@ -300,8 +342,26 @@ void run_session(const Options& opts, const StartRequest& sr) {
     // Continue the inbound sequence after the handshake response (seq 0 in
     // practice, since it is the first inbound stream-data message).
     int64_t next_expected = handshake_seq + 1;
+    // Idle/liveness: MGS does not reliably relay a client disconnect as
+    // channel_closed, so back two independent reapers (issue #2): (a) the
+    // Outbox declares the peer dead when output goes unacked past its ceiling
+    // (covers a client that vanishes mid-output), and (b) this idle deadline
+    // ends a session with no inbound traffic for kIdleTimeoutMs (covers an idle
+    // shell whose client is gone). Without these the shell/pty/data channel leak.
+    int64_t last_client_activity = util::now_epoch();
     bool running = true;
     while (running && (!opts.stop || !opts.stop->load())) {
+        // 0. Resend unacked stream-data; a peer that stops acking is gone.
+        if (!pump_outbox(ws, outbox)) {
+            logging::logf(logging::Info, "session %s: peer stopped acknowledging; reaping",
+                          sr.session_id.c_str());
+            break;
+        }
+        if (util::now_epoch() - last_client_activity > kIdleTimeoutSeconds) {
+            logging::logf(logging::Info, "session %s: idle timeout; reaping", sr.session_id.c_str());
+            break;
+        }
+
         // 1. Drain all currently-available pty output to the customer, so a
         //    chatty command is not throttled to one chunk per recv timeout.
         bool sent_output = false;
@@ -312,7 +372,7 @@ void run_session(const Options& opts, const StartRequest& sr) {
                 sent_output = true;
                 std::string derr;
                 if (!send_stream(ws, mgs::kPayloadOutput,
-                                 std::string(buf, static_cast<size_t>(n)), out_seq, derr)) {
+                                 std::string(buf, static_cast<size_t>(n)), out_seq, outbox, derr)) {
                     logging::logf(logging::Warn, "session %s: output send failed: %s",
                                   sr.session_id.c_str(), derr.c_str());
                     running = false;
@@ -343,11 +403,17 @@ void run_session(const Options& opts, const StartRequest& sr) {
         std::string derr;
         if (!mgs::deserialize(f.payload, m, derr)) continue;
 
+        // Any inbound frame proves the client is still there.
+        last_client_activity = util::now_epoch();
+
         if (m.message_type == mgs::kMsgChannelClosed) {
             logging::logf(logging::Info, "session %s: terminate requested", sr.session_id.c_str());
             break;
         }
-        if (m.message_type == mgs::kMsgAcknowledge) continue;  // client acking our output
+        if (m.message_type == mgs::kMsgAcknowledge) {
+            handle_ack(m, outbox);  // clears buffered output frames
+            continue;
+        }
         if (m.message_type != mgs::kMsgInputStreamData) {
             send_ack(ws, m);
             continue;
@@ -391,7 +457,7 @@ void run_session(const Options& opts, const StartRequest& sr) {
 
     std::string derr;
     const int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-    send_stream(ws, mgs::kPayloadExitCode, std::to_string(exit_code), out_seq, derr);
+    send_stream(ws, mgs::kPayloadExitCode, std::to_string(exit_code), out_seq, outbox, derr);
     json::Value st = json::obj();
     st.object["SchemaVersion"] = json::num(1);
     st.object["SessionState"] = json::str("Terminating");
@@ -402,6 +468,29 @@ void run_session(const Options& opts, const StartRequest& sr) {
 }
 
 }  // namespace
+
+void Outbox::add(int64_t seq, std::string frame, int64_t now_ms) {
+    if (buf_.size() >= kMaxBuffered) buf_.pop_front();  // bound memory (see header)
+    buf_.push_back({seq, std::move(frame), now_ms, 0});
+}
+
+void Outbox::ack(int64_t seq) {
+    while (!buf_.empty() && buf_.front().seq <= seq) buf_.pop_front();
+}
+
+const std::string* Outbox::due_resend(int64_t now_ms, bool& dead) {
+    dead = false;
+    if (buf_.empty()) return nullptr;
+    Entry& front = buf_.front();
+    if (now_ms - front.last_sent_ms < kResendIntervalMs) return nullptr;
+    if (front.resends >= kMaxResends) {
+        dead = true;
+        return nullptr;
+    }
+    front.last_sent_ms = now_ms;
+    front.resends++;
+    return &front.frame;
+}
 
 StartRequest parse_start_request(const std::string& mgs_payload) {
     StartRequest sr;

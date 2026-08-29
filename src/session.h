@@ -14,12 +14,53 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <string>
 
 #include "aws.h"
 #include "json.h"
 
 namespace session {
+
+// Retransmission buffer for outbound stream-data, mirroring the reference
+// agent's ResendStreamDataMessageScheduler (datachannel.go): MGS silently drops
+// a stream-data frame that arrives before the peer's channel is bridged (most
+// importantly the very first message, the HandshakeRequest), and only resends
+// get it through. We buffer each sent frame until the client acknowledges its
+// sequence, resend the oldest unacked on a timer, and treat a frame that goes
+// unacked past a ceiling as a dead peer (client gone) so the session can be
+// reaped instead of leaking a shell. Pure logic, host-testable.
+class Outbox {
+public:
+    // Resend the oldest unacked frame no more often than this.
+    static constexpr int64_t kResendIntervalMs = 250;
+    // Declare the peer dead after this many resends of the oldest frame with no
+    // ack (~60 s at the interval above).
+    static constexpr int kMaxResends = 240;
+    // Bound memory if a client acks far slower than the shell produces output:
+    // evict the oldest rather than grow without limit.
+    static constexpr size_t kMaxBuffered = 8192;
+
+    void add(int64_t seq, std::string frame, int64_t now_ms);
+    // Ordered delivery: an ack of `seq` clears that frame and any older.
+    void ack(int64_t seq);
+    bool empty() const { return buf_.empty(); }
+    size_t size() const { return buf_.size(); }
+
+    // If the oldest unacked frame is due for resend at now_ms, return its bytes
+    // and record the resend; otherwise nullptr. Sets `dead` when the oldest has
+    // exceeded kMaxResends (peer is not acknowledging -> gone).
+    const std::string* due_resend(int64_t now_ms, bool& dead);
+
+private:
+    struct Entry {
+        int64_t seq;
+        std::string frame;
+        int64_t last_sent_ms;
+        int resends;
+    };
+    std::deque<Entry> buf_;
+};
 
 // Parsed from the interactive_shell AgentMessage payload. The MGS payload is a
 // JSON envelope ("Content" holds a stringified AgentTaskPayload) -- see

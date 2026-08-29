@@ -43,9 +43,28 @@ host tests missed because they used the documented layout, not the live bytes:
    digest for the HandshakeResponse didn't match our computation → the handshake
    was silently dropped and the pty never forked.
 
-Both fixed and regression-tested (216/216 host checks). The pty layer itself
-(`posix_openpt` et al., echo, resize, exit) is **still UNVERIFIED** — it was
-unreachable until the handshake completes, so F6 needs a re-run on hardware.
+Both fixed and regression-tested. **Live re-test (issue #2, 2026-08-29)** with
+those two fixes got the pty layer its first live proof — the reporter confirmed
+**echo, `TIOCSWINSZ` resize, `exit`, 4-way concurrency, and a 5000-line burst
+all PASS on haiku/arm64** — after working around a *third* divergence, and found
+one lifecycle leak:
+
+- **F6-3 (blocker): no retransmission of unacked stream-data.** MGS silently
+  drops the first HandshakeRequest (it arrives before the peer channel is
+  bridged) and waits; we sent it once and hung. The reference agent runs a
+  `ResendStreamDataMessageScheduler`. Fixed with an `Outbox` that resends the
+  oldest unacked frame every 250 ms until the client acks its sequence.
+- **F6-4 (leak): shell/pty never reaped on client disconnect.** MGS did not
+  relay a `channel_closed`, so a session not ended by an in-shell `exit` leaked
+  the shell + pty + data channel. Fixed with two reapers: the `Outbox` declares
+  the peer dead when output goes unacked past its ceiling (~60 s; covers a client
+  that vanishes mid-output), and a 20-minute idle-input deadline (covers an idle
+  shell whose client is gone), matching SSM's default idle-session timeout.
+
+Both fixed and regression-tested (`Outbox` resend/ack/dead-peer/memory-bound
+covered in `make check`). The pty layer is now **live-proven**; F6 needs a final
+re-run to confirm the handshake completes without the manual resend patch and
+that the leak is closed.
 
 ## Phase 3 (v0.3.0) — Patch Manager, host-validated, live gates PENDING
 

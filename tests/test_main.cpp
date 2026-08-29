@@ -716,6 +716,56 @@ void test_session_parsing() {
           "failed action rejected");
 }
 
+void test_session_outbox() {
+    std::printf("session: outbox resend + dead-peer detection\n");
+    // Issue #2 (third divergence): the first HandshakeRequest is dropped by MGS
+    // and must be resent until acked, or the handshake never completes.
+    session::Outbox ob;
+    int64_t t = 1000;
+    ob.add(0, "handshake-frame", t);
+    check(!ob.empty() && ob.size() == 1, "frame buffered");
+
+    bool dead = false;
+    // Not yet due (interval not elapsed).
+    check(ob.due_resend(t + 10, dead) == nullptr && !dead, "no resend before interval");
+    // Due after the interval → returns the frame to resend.
+    const std::string* f = ob.due_resend(t + session::Outbox::kResendIntervalMs, dead);
+    check(f != nullptr && *f == "handshake-frame" && !dead, "resend oldest when due");
+
+    // Ack clears it; nothing more to resend.
+    ob.ack(0);
+    check(ob.empty(), "ack clears the frame");
+    check(ob.due_resend(t + 100000, dead) == nullptr && !dead, "nothing to resend after ack");
+
+    // Ordered ack clears everything up to the acked sequence.
+    session::Outbox ob2;
+    ob2.add(0, "a", t);
+    ob2.add(1, "b", t);
+    ob2.add(2, "c", t);
+    ob2.ack(1);
+    check(ob2.size() == 1, "cumulative ack clears <= acked seq");
+
+    // Dead-peer: oldest frame resent past the ceiling with no ack.
+    session::Outbox ob3;
+    ob3.add(0, "x", 0);
+    int64_t now = 0;
+    for (int i = 0; i < session::Outbox::kMaxResends; i++) {
+        now += session::Outbox::kResendIntervalMs;
+        bool d = false;
+        ob3.due_resend(now, d);
+        check(!d, "not dead before ceiling");
+    }
+    now += session::Outbox::kResendIntervalMs;
+    bool d = false;
+    check(ob3.due_resend(now, d) == nullptr && d, "dead peer after ceiling of unacked resends");
+
+    // Memory bound: never grows past kMaxBuffered.
+    session::Outbox ob4;
+    for (size_t i = 0; i < session::Outbox::kMaxBuffered + 100; i++)
+        ob4.add(static_cast<int64_t>(i), "f", 0);
+    check(ob4.size() == session::Outbox::kMaxBuffered, "outbox is memory-bounded");
+}
+
 }  // namespace
 
 int main() {
@@ -745,6 +795,7 @@ int main() {
     test_ws_framing();
     test_mgs_agentmessage();
     test_session_parsing();
+    test_session_outbox();
 
     std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
