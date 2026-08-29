@@ -128,6 +128,25 @@ F1 first (unblocks F2 + F3 and the fleet's I/O autonomy) → F2 (trivial once F1
 Each is a separate feature branch + hpkg version bump; the agent is a single package so
 a version bump has no repo-index race with the build-wave staging prefix.
 
+## 3a. Rejected alternatives (revisit only if the premises change)
+
+**Rewrite in Rust or Go — no.** The hard part was never the language; it was the
+platform spadework (own TLS, HTTP/1.1, SigV4, JSON, CA anchors, clock guard), and
+that is done and hardware-proven. A rewrite re-pays all of it for zero functional
+gain. Go's runtime/GC and Rust's std both assume libc/OS surfaces haiku/arm64 only
+partially provides, so you would port a runtime before writing agent logic. The
+artifact is ~1.1 MB and boots as the *first* manageable thing on a bare image. Rust
+now cross-compiles to Haiku arm64 in this project, so it is a candidate for a **new**
+component (e.g. an F5 Session Manager PTY/websocket path) — never a reason to rewrite
+the working agent.
+
+**Adopt `aws-sdk-cpp` — no.** It has no haiku/arm64 build and pulls in libcurl +
+OpenSSL + CMake, which destroys the self-contained-on-a-base-image property that lets
+this run before any package is installed; a 1.1 MB binary would become tens of MB of
+dependencies to port and bake. Keep the minimal hand-rolled SigV4/HTTP core. Only
+reconsider a real SDK if the agent ever moves *off* the base-image critical path (a
+separate, richly-provisioned management box) — not for the fleet agent itself.
+
 ## 4. Build & package quick-ref
 - Native build on a canonical arm64 box: install toolchain via DeBeOS repo
   (`graviton/scripts/haiku-provision-native-builder`), `make lib` for mbedTLS, then
@@ -137,3 +156,14 @@ a version bump has no repo-index race with the build-wave staging prefix.
   vendor **DeBeOS**, `requires { haiku }`, mandatory `licenses{}`+`copyrights{}`).
   `package create -C pkgroot haiku_mgmt_agent-<ver>-arm64.hpkg`.
 - Publish to the DeBeOS CDN repo via `graviton/scripts/haiku-repo-publish-remote`.
+- Reproducible packaging now lives in-repo: `packaging/build-hpkg.sh` (+
+  `packaging/PackageInfo.in`, `LICENSE`, `packaging/launch/haiku-mgmt-agent-packaged`).
+  v0.1.0 was packaged by hand; v0.2.0 uses the script.
+
+### First-hop install caveat (0.1 → 0.2)
+A running instance has no downloader (no aws CLI / wget / curl on the base image) and
+v0.1.0 has no `s3 cp`, so the **first** upgrade cannot pull its own artifact. Options:
+publish the hpkg to the DeBeOS CDN repo and `pkgman install` (pkgman fetches over
+https — the intended path, and it also arms F3 for every later upgrade); or transfer
+once over SSH (keys) / a shared-SG HTTP port. Once v0.2.0 is on a node, its own `s3 cp`
+and `--update-manifest` self-update make all subsequent hops network-autonomous.
