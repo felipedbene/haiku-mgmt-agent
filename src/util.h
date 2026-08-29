@@ -12,6 +12,14 @@ namespace util {
 
 // ---- crypto (mbedTLS) ----
 std::string sha256_hex(const std::string& data);
+std::string sha256_raw(const std::string& data);  // 32 raw bytes (MGS payload digest)
+std::string sha1_raw(const std::string& data);    // 20 raw bytes (WebSocket accept key)
+std::string base64_encode(const std::string& raw);
+// Cryptographically random bytes from /dev/urandom ("" on failure).
+std::string random_bytes(size_t n);
+// Streaming digest of a file, for artifacts too big to slurp (self-update
+// binaries, S3 uploads). Returns "" when the file cannot be read.
+std::string sha256_file_hex(const std::string& path);
 std::string hmac_sha256(const std::string& key, const std::string& data);  // raw bytes out
 std::string to_hex(const std::string& raw);
 
@@ -24,6 +32,9 @@ std::string amz_datestamp(int64_t epoch);
 std::string iso8601(int64_t epoch_ms);
 // SSM RunID: yyyy-MM-ddTHH-mm-ss.fffZ            (agent/times/times.go ToIsoDashUTC)
 std::string iso_dash(int64_t epoch_ms);
+// Inventory CaptureTime: yyyy-MM-ddTHH:mm:ssZ -- PutInventory rejects
+// fractional seconds, unlike the SSM reply timestamps above.
+std::string iso8601_seconds(int64_t epoch);
 
 int64_t now_epoch();
 int64_t now_epoch_ms();
@@ -46,5 +57,13 @@ std::string lower(std::string s);
 
 // Truncate to `max` bytes, appending `suffix` when it had to cut.
 std::string clip(const std::string& s, size_t max, const std::string& suffix = "");
+
+// SigV4 canonical URI encoding (RFC 3986 unreserved set). `encode_slash`
+// distinguishes path segments (false: '/' kept) from query values (true).
+std::string uri_encode(const std::string& s, bool encode_slash);
+
+// Compares dotted numeric versions ("0.1.0" < "0.2.0" < "0.10.0"). Non-numeric
+// tails compare as 0, so a malformed manifest can never look "newer".
+int version_compare(const std::string& a, const std::string& b);
 
 }  // namespace util

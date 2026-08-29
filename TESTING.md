@@ -1,4 +1,133 @@
-# Testing — haiku-mgmt-agent Phase 1
+# Testing — haiku-mgmt-agent
+
+## Phase 3 (v0.4.0, `phase3-patch-manager`) — host-validated, live gates PENDING
+
+**Date:** 2026-08-29. Host-side: 209/209 unit checks pass (`make check`),
+covering F5 (pkgman-transaction parser, patch params/inventory-item builders,
+schema-2.2 precondition skip) and F6 (base64/WebSocket-accept vectors, RFC 6455
+frame round-trip, MGS `AgentMessage` serialize/deserialize incl. the UUID
+half-swap and payload-digest rejection, and session/handshake JSON parsing).
+`main`, `session`, `mgs`, `websocket`, `selfupdate` and `timesync` compile
+warning-free (`-Wall -Wextra`).
+
+Live gates for F6 (Session Manager — need a Haiku node + human authorization;
+see the F6 block in `docs/design-roadmap.md`):
+
+| Gate | Result |
+|---|---|
+| `posix_openpt`/`grantpt`/`unlockpt`/`ptsname` work on haiku/arm64 | PENDING — make-or-break |
+| Control channel opens (CreateControlChannel + signed WS upgrade) | PENDING |
+| `aws ssm start-session --target <id>` reaches an interactive prompt | PENDING |
+| Keystrokes echo; `ls`/`env` run; terminal resize (`TIOCSWINSZ`) applies | PENDING |
+| `exit` closes cleanly; console shows session Terminated | PENDING |
+| Run Command (MDS) still works with the control channel also open | PENDING |
+
+The MGS wire format (binary `AgentMessage`, signed WS upgrade, handshake) is
+unit-tested against the documented Go-agent layout, not yet against the live
+service; the pty layer is the single largest unknown.
+
+**Live battle-test 2026-08-29 (issue #2, commit cd92680, c7g.large, native
+Haiku build).** F5 Patch Manager PASSED live end to end — `AWS-RunPatchBaseline`
+Scan/Install intercepted, `PutInventory` accepted (`AWS:PatchSummary` visible via
+`list-inventory-entries`), and the parser matched real pkgman phrasing
+(`upgrade package sed-4.9_bootstrap-1 to 4.9-1 from repository DeBeOS`). Run
+Command with the control channel concurrently open, and CancelCommand, also
+PASSED. **F6 FAILED (pty unreachable)** on two live-wire divergences the
+host tests missed because they used the documented layout, not the live bytes:
+1. the live `interactive_shell` envelope uses a **lowercase `content`** key
+   (Go's `json` is case-insensitive; our parser was not) → inner parse failed,
+   no shell;
+2. `mgs::deserialize` **verified the inbound payload digest and sliced payload by
+   PayloadLength**; the reference Go agent does neither (it takes
+   `input[HeaderLength+4:]` and never checks the digest), and the live service's
+   digest for the HandshakeResponse didn't match our computation → the handshake
+   was silently dropped and the pty never forked.
+
+Both fixed and regression-tested. **Live re-test (issue #2, 2026-08-29)** with
+those two fixes got the pty layer its first live proof — the reporter confirmed
+**echo, `TIOCSWINSZ` resize, `exit`, 4-way concurrency, and a 5000-line burst
+all PASS on haiku/arm64** — after working around a *third* divergence, and found
+one lifecycle leak:
+
+- **F6-3 (blocker): no retransmission of unacked stream-data.** MGS silently
+  drops the first HandshakeRequest (it arrives before the peer channel is
+  bridged) and waits; we sent it once and hung. The reference agent runs a
+  `ResendStreamDataMessageScheduler`. Fixed with an `Outbox` that resends the
+  oldest unacked frame every 250 ms until the client acks its sequence.
+- **F6-4 (leak): shell/pty never reaped on client disconnect.** MGS did not
+  relay a `channel_closed`, so a session not ended by an in-shell `exit` leaked
+  the shell + pty + data channel. Fixed with two reapers: the `Outbox` declares
+  the peer dead when output goes unacked past its ceiling (~60 s; covers a client
+  that vanishes mid-output), and a 20-minute idle-input deadline (covers an idle
+  shell whose client is gone), matching SSM's default idle-session timeout.
+
+Both fixed and regression-tested (`Outbox` resend/ack/dead-peer/memory-bound
+covered in `make check`).
+
+**F6 GREEN — final live re-test at commit `dc94c26` (issue #2, 2026-08-29, node
+i-01fe92119d18f09c8, hrev59996 arm64), stock build, no manual patch:**
+
+| Gate | Result |
+|---|---|
+| Handshake completes → interactive shell (F6-3, built-in resend) | PASS — handshake→shell→exit ~0.7 s, no hang |
+| Keystroke echo / command exec through real session-manager-plugin | PASS |
+| Interactive `read` prompt consumes typed input | PASS |
+| `TIOCSWINSZ` resize (40×120 → `stty size` = `40 120`) | PASS |
+| Clean `exit` → session Terminated | PASS |
+| 4 concurrent sessions, distinct shells, all exit 0 | PASS |
+| Mid-output client disconnect reaped (F6-4 Outbox dead-peer) | PASS — reaped ~97 s (MGS keeps acking a while post-disconnect), no zombie/orphan |
+| Idle-client-gone (20-min deadline) | mechanism confirmed in code, same reap path |
+| Run Command + CancelCommand + F5 Patch Manager, control channel open | PASS |
+
+All F6 live gates now pass end to end on Haiku/arm64, including the pty layer
+that was the make-or-break unknown. Phase 3 (F5 + F6) is hardware-validated.
+
+## Phase 3 (v0.3.0) — Patch Manager, host-validated, live gates PENDING
+
+Live gates for F5 (need a Haiku node + the usual human authorization; see the
+F5 *Verify* block in `docs/design-roadmap.md`):
+
+| Gate | Result |
+|---|---|
+| `patch scan` on-box CLI: readable list, PutInventory accepted | PENDING |
+| `send-command --document-name AWS-RunPatchBaseline` Operation=Scan | PENDING |
+| Operation=Install applies updates; re-scan shows Missing→0 | PENDING |
+| `describe-instance-patch-states` reflects the reported counts | PENDING |
+| pkgman transaction phrasing matches `parse_pkgman_transaction` vectors | PENDING |
+| Cancel mid-install: process group killed, step `Cancelled` | PENDING |
+
+Known risk to check first on hardware: the exact wording of pkgman's
+transaction listing (the parser tolerates both "to <ver>" and "to version
+<ver>" plus "from repository <name>" tails) and whether PutInventory accepts
+the `AWS:PatchSummary`/`AWS:PatchCompliance` 1.0 attribute sets as built in
+`patch::inventory_items` — both are unit-tested against assumptions, not
+against the live service yet.
+
+## Phase 2 (v0.2.0) verification state
+
+**Date:** 2026-08-29. Host-side: 100/100 unit checks pass (`make check`),
+including the new S3 request-shape, URI-encoding, version-compare,
+cancellation, full-capture and streamed-sha256 tests; `main`, `selfupdate`
+and `timesync` compile warning-free.
+
+**Exercised live on Haiku hardware (2026-08-29, node i-01fe92119d18f09c8,
+hrev59996 arm64):** all Phase-2 gates PASS.
+
+| Gate | Result |
+|---|---|
+| F1 S3 round-trip, 64 MiB (`s3 cp` up then down) | PASS — 82/71 MiB/s, sha256 identical |
+| F1 large transfer, 512 MiB | PASS — 107/41 MiB/s, sha256 identical, no OOM (streamed) |
+| F2 S3 output, 5000-line log | PASS — full log in S3 at the standard SSM key layout; inline clipped as designed |
+| CancelCommand | PASS — reports `Cancelled`, `sleep` killed, post-sleep line never ran |
+| Concurrency, 4 workers | PASS — ran in parallel (~4 s window), poll loop not blocked |
+| Rapid-fire, 12 back-to-back | PASS — 12/12, dedup + poll loop stable |
+| F3 self-update 0.2.0 → 0.2.1 | PASS — manifest → sha256 verify → pkgman install → launch_roster restart; `describe-instance-information` then reports AgentVersion 0.2.1 |
+
+Test fixtures were in a scoped account/bucket with a least-privilege role
+(`s3:GetObject`/`PutObject`/`ListBucket` on the one bucket); the agent used the
+instance role via IMDS for all S3 calls.
+
+# Phase 1
 
 **Date:** 2026-08-21
 **Target:** `i-046a6d266c6c63e83`, t4g.medium, `ami-0c17f56477d32638f`

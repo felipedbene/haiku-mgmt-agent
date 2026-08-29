@@ -1,9 +1,12 @@
 #include "util.h"
 
 #include <mbedtls/md.h>
+#include <mbedtls/sha1.h>
 #include <mbedtls/sha256.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -14,6 +17,78 @@ std::string sha256_hex(const std::string& data) {
     unsigned char out[32];
     mbedtls_sha256(reinterpret_cast<const unsigned char*>(data.data()), data.size(), out, 0);
     return to_hex(std::string(reinterpret_cast<char*>(out), sizeof(out)));
+}
+
+std::string sha256_file_hex(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return "";
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0);
+    char buf[64 * 1024];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        mbedtls_sha256_update(&ctx, reinterpret_cast<unsigned char*>(buf), n);
+    const bool read_ok = std::feof(f) && !std::ferror(f);
+    std::fclose(f);
+    unsigned char out[32];
+    mbedtls_sha256_finish(&ctx, out);
+    mbedtls_sha256_free(&ctx);
+    if (!read_ok) return "";
+    return to_hex(std::string(reinterpret_cast<char*>(out), sizeof(out)));
+}
+
+std::string sha256_raw(const std::string& data) {
+    unsigned char out[32];
+    mbedtls_sha256(reinterpret_cast<const unsigned char*>(data.data()), data.size(), out, 0);
+    return std::string(reinterpret_cast<char*>(out), sizeof(out));
+}
+
+std::string sha1_raw(const std::string& data) {
+    unsigned char out[20];
+    mbedtls_sha1(reinterpret_cast<const unsigned char*>(data.data()), data.size(), out);
+    return std::string(reinterpret_cast<char*>(out), sizeof(out));
+}
+
+std::string base64_encode(const std::string& raw) {
+    static const char* alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((raw.size() + 2) / 3) * 4);
+    size_t i = 0;
+    while (i + 3 <= raw.size()) {
+        uint32_t v = (static_cast<unsigned char>(raw[i]) << 16) |
+                     (static_cast<unsigned char>(raw[i + 1]) << 8) |
+                     static_cast<unsigned char>(raw[i + 2]);
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += alphabet[(v >> 6) & 63];
+        out += alphabet[v & 63];
+        i += 3;
+    }
+    if (i + 1 == raw.size()) {
+        uint32_t v = static_cast<unsigned char>(raw[i]) << 16;
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += "==";
+    } else if (i + 2 == raw.size()) {
+        uint32_t v = (static_cast<unsigned char>(raw[i]) << 16) |
+                     (static_cast<unsigned char>(raw[i + 1]) << 8);
+        out += alphabet[(v >> 18) & 63];
+        out += alphabet[(v >> 12) & 63];
+        out += alphabet[(v >> 6) & 63];
+        out += '=';
+    }
+    return out;
+}
+
+std::string random_bytes(size_t n) {
+    std::FILE* f = std::fopen("/dev/urandom", "rb");
+    if (!f) return "";
+    std::string out(n, '\0');
+    size_t got = std::fread(&out[0], 1, n, f);
+    std::fclose(f);
+    return got == n ? out : "";
 }
 
 std::string hmac_sha256(const std::string& key, const std::string& data) {
@@ -69,6 +144,14 @@ std::string iso8601(int64_t epoch_ms) {
     std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
                   static_cast<int>(epoch_ms % 1000));
+    return buf;
+}
+
+std::string iso8601_seconds(int64_t epoch) {
+    struct tm tm = gmt(epoch);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
     return buf;
 }
 
@@ -198,6 +281,36 @@ std::string clip(const std::string& s, size_t max, const std::string& suffix) {
     if (s.size() <= max) return s;
     if (suffix.size() >= max) return s.substr(0, max);
     return s.substr(0, max - suffix.size()) + suffix;
+}
+
+std::string uri_encode(const std::string& s, bool encode_slash) {
+    static const char* digits = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
+        if (unreserved || (c == '/' && !encode_slash)) {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += digits[c >> 4];
+            out += digits[c & 0x0F];
+        }
+    }
+    return out;
+}
+
+int version_compare(const std::string& a, const std::string& b) {
+    std::vector<std::string> pa = split(a, '.');
+    std::vector<std::string> pb = split(b, '.');
+    const size_t n = std::max(pa.size(), pb.size());
+    for (size_t i = 0; i < n; i++) {
+        long va = i < pa.size() ? std::strtol(pa[i].c_str(), nullptr, 10) : 0;
+        long vb = i < pb.size() ? std::strtol(pb[i].c_str(), nullptr, 10) : 0;
+        if (va != vb) return va < vb ? -1 : 1;
+    }
+    return 0;
 }
 
 }  // namespace util

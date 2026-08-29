@@ -1,6 +1,7 @@
 #include "runner.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 #include <map>
 
@@ -80,6 +81,39 @@ std::vector<std::string> command_lines(const json::Value& inputs) {
         lines.push_back(rc->string);
     }
     return lines;
+}
+
+// Schema-2.2 precondition: {"StringEquals": ["platformType", "Linux"]}. We
+// present platformType Linux (the enum has no Haiku), so cross-platform
+// documents' Windows/MacOS steps must be skipped, not failed. Returns false
+// (do not skip) when the precondition is absent or has a shape we cannot
+// evaluate: a visible failure beats a silent skip.
+bool precondition_excludes_step(const json::Value& precondition) {
+    if (!precondition.is_obj()) return false;
+    const json::Value* eq = precondition.find("StringEquals");
+    if (!eq || !eq->is_arr() || eq->array.size() != 2) return false;
+    std::string var = util::lower(util::trim(eq->array[0].str()));
+    std::string val = util::lower(util::trim(eq->array[1].str()));
+    if (val == "platformtype") std::swap(var, val);
+    if (var != "platformtype" && var != "{{platformtype}}" && var != "{{ platformtype }}")
+        return false;
+    return val != "linux";
+}
+
+StepResult skipped(const std::string& plugin_id, const std::string& action,
+                   const std::string& start_time) {
+    StepResult sr;
+    sr.plugin_id = plugin_id;
+    sr.action = action;
+    sr.status = "Skipped";
+    sr.code = 0;
+    sr.output = "Step execution skipped due to unsatisfied preconditions: '\"StringEquals\": [platformType, Linux]'.";
+    sr.standard_output = sr.output;
+    sr.start_time = start_time;
+    sr.end_time = util::iso8601(util::now_epoch_ms());
+    logging::logf(logging::Info, "step %s skipped: precondition excludes this platform",
+                  plugin_id.c_str());
+    return sr;
 }
 
 StepResult unsupported(const std::string& plugin_id, const std::string& action,
@@ -162,7 +196,8 @@ json::Value resolve(const json::Value& node, const json::Value& parameters,
     return walk(node);
 }
 
-DocumentOutcome run_document(const json::Value& document_content, const json::Value& parameters) {
+DocumentOutcome run_document(const json::Value& document_content, const json::Value& parameters,
+                             const Options& options) {
     DocumentOutcome outcome;
     outcome.status = "Success";
 
@@ -174,6 +209,7 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
         std::string plugin_id;
         std::string action;
         json::Value inputs;
+        json::Value precondition;
     };
     std::vector<Step> steps;
 
@@ -185,6 +221,8 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
             st.plugin_id = s.str_at("name", st.action);
             const json::Value* in = s.find("inputs");
             if (in) st.inputs = *in;
+            const json::Value* pre = s.find("precondition");
+            if (pre) st.precondition = *pre;
             steps.push_back(st);
         }
     } else if (const json::Value* rc = document_content.find("runtimeConfig")) {
@@ -213,6 +251,12 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
 
     for (const Step& st : steps) {
         const std::string start_time = util::iso8601(util::now_epoch_ms());
+
+        if (precondition_excludes_step(st.precondition)) {
+            // Skipped steps never change the document status.
+            outcome.steps.push_back(skipped(st.plugin_id, st.action, start_time));
+            continue;
+        }
 
         if (st.action != kRunShellScript) {
             outcome.steps.push_back(unsupported(st.plugin_id, st.action, start_time));
@@ -245,7 +289,8 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
         logging::logf(logging::Info, "running step %s (%s), timeout=%ds, %zu line(s)",
                       st.plugin_id.c_str(), st.action.c_str(), timeout, lines.size());
 
-        exec::Result er = exec::run_shell(script, timeout, workdir, kMaxStdoutLength);
+        const size_t capture = std::max(options.max_capture, kMaxStdoutLength);
+        exec::Result er = exec::run_shell(script, timeout, workdir, capture, options.cancel);
 
         StepResult sr;
         sr.plugin_id = st.plugin_id;
@@ -254,9 +299,14 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
         sr.end_time = util::iso8601(util::now_epoch_ms());
         sr.standard_output = util::clip(er.stdout_data, kMaxStdoutLength);
         sr.standard_error = util::clip(er.stderr_data, kMaxStdoutLength);
+        sr.full_stdout = std::move(er.stdout_data);
+        sr.full_stderr = std::move(er.stderr_data);
         sr.code = er.exit_code;
 
-        if (!er.error.empty()) {
+        if (er.cancelled) {
+            sr.status = "Cancelled";
+            if (sr.code == 0) sr.code = 1;
+        } else if (!er.error.empty()) {
             sr.status = "Failed";
             sr.standard_error += (sr.standard_error.empty() ? "" : "\n") + er.error;
             if (sr.code == 0) sr.code = 1;
@@ -268,8 +318,15 @@ DocumentOutcome run_document(const json::Value& document_content, const json::Va
         }
 
         sr.output = truncate_output(sr.standard_output, sr.standard_error, kMaxPluginOutputSize);
-        if (sr.status != "Success") outcome.status = "Failed";
+        if (sr.status == "Cancelled")
+            outcome.status = "Cancelled";
+        else if (sr.status != "Success" && outcome.status != "Cancelled")
+            outcome.status = "Failed";
         outcome.steps.push_back(sr);
+
+        // A cancelled document stops here: running the remaining steps after
+        // the user asked for a stop would be worse than skipping them.
+        if (er.cancelled) break;
 
         logging::logf(logging::Info, "step %s finished: status=%s code=%d stdout=%zuB stderr=%zuB",
                       sr.plugin_id.c_str(), sr.status.c_str(), sr.code, sr.standard_output.size(),
@@ -312,8 +369,8 @@ std::string reply_payload(const AgentInfo& agent, const std::string& document_st
         st.object["output"] = json::str(s.output);
         st.object["startDateTime"] = json::str(s.start_time);
         st.object["endDateTime"] = json::str(s.end_time);
-        st.object["outputS3BucketName"] = json::str("");
-        st.object["outputS3KeyPrefix"] = json::str("");
+        st.object["outputS3BucketName"] = json::str(s.output_s3_bucket);
+        st.object["outputS3KeyPrefix"] = json::str(s.output_s3_key_prefix);
         st.object["stepName"] = json::str(s.plugin_id);
         st.object["standardOutput"] = json::str(s.standard_output);
         st.object["standardError"] = json::str(s.standard_error);

@@ -175,6 +175,47 @@ std::string signing_key(const std::string& secret, const std::string& datestamp,
     return util::hmac_sha256(k_service, "aws4_request");
 }
 
+std::vector<std::pair<std::string, std::string>> sigv4_headers(
+    const std::string& method, const std::string& service, const std::string& region,
+    const Credentials& creds, const std::string& host, const std::string& path,
+    const std::string& query, const std::string& payload_sha256_hex, int64_t now) {
+    const std::string amzdate = util::amz_date(now);
+    const std::string datestamp = util::amz_datestamp(now);
+
+    std::vector<std::pair<std::string, std::string>> signed_headers = {
+        {"host", host},
+        {"x-amz-date", amzdate},
+    };
+    if (!creds.token.empty()) signed_headers.push_back({"x-amz-security-token", creds.token});
+    std::sort(signed_headers.begin(), signed_headers.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::string canonical_headers, signed_names;
+    for (size_t i = 0; i < signed_headers.size(); i++) {
+        canonical_headers += signed_headers[i].first + ":" + signed_headers[i].second + "\n";
+        if (i) signed_names += ";";
+        signed_names += signed_headers[i].first;
+    }
+
+    const std::string canonical_request = method + "\n" + path + "\n" + query + "\n" +
+                                          canonical_headers + "\n" + signed_names + "\n" +
+                                          payload_sha256_hex;
+    const std::string scope = datestamp + "/" + region + "/" + service + "/aws4_request";
+    const std::string string_to_sign =
+        "AWS4-HMAC-SHA256\n" + amzdate + "\n" + scope + "\n" + util::sha256_hex(canonical_request);
+    const std::string signature = util::to_hex(
+        util::hmac_sha256(signing_key(creds.secret_key, datestamp, region, service),
+                          string_to_sign));
+
+    std::vector<std::pair<std::string, std::string>> out;
+    out.push_back({"X-Amz-Date", amzdate});
+    if (!creds.token.empty()) out.push_back({"X-Amz-Security-Token", creds.token});
+    out.push_back({"Authorization",
+                   "AWS4-HMAC-SHA256 Credential=" + creds.access_key + "/" + scope +
+                       ", SignedHeaders=" + signed_names + ", Signature=" + signature});
+    return out;
+}
+
 http::Response call(const std::string& service, const std::string& target_prefix,
                     const std::string& operation, const std::string& region,
                     const Credentials& creds, const std::string& body, int timeout_ms) {
@@ -297,6 +338,14 @@ http::Response fail_message(const std::string& region, const Credentials& creds,
     b.object["MessageId"] = json::str(message_id);
     b.object["FailureType"] = json::str(failure_type);
     return call("ec2messages", kMdsTargetPrefix, "FailMessage", region, creds, json::dump(b));
+}
+
+http::Response put_inventory(const std::string& region, const Credentials& creds,
+                             const std::string& instance_id, const json::Value& items) {
+    json::Value b = json::obj();
+    b.object["InstanceId"] = json::str(instance_id);
+    b.object["Items"] = items;
+    return call("ssm", kSsmTargetPrefix, "PutInventory", region, creds, json::dump(b));
 }
 
 }  // namespace aws
