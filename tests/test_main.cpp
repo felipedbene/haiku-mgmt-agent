@@ -14,6 +14,7 @@
 #include "exec.h"
 #include "json.h"
 #include "log.h"
+#include "metrics.h"
 #include "mgs.h"
 #include "patch.h"
 #include "runner.h"
@@ -766,6 +767,59 @@ void test_session_outbox() {
     check(ob4.size() == session::Outbox::kMaxBuffered, "outbox is memory-bounded");
 }
 
+// F7/#119: the pure metrics logic -- CPU% from two samples, and the CloudWatch
+// PutMetricData Query-protocol body. collect() itself needs Haiku, so it is not
+// tested here; these functions carry the arithmetic and serialization risk.
+void test_metrics() {
+    // CPU%: one CPU busy for the whole 1s window -> 100%.
+    metrics::Sample a;
+    a.valid = true; a.wall_us = 1'000'000; a.cpu_count = 1; a.cpu_active_us = 0;
+    metrics::Sample b;
+    b.valid = true; b.wall_us = 2'000'000; b.cpu_count = 1; b.cpu_active_us = 1'000'000;
+    check(metrics::cpu_percent(a, b) > 99.9 && metrics::cpu_percent(a, b) <= 100.0,
+          "cpu_percent: fully busy single core -> 100%");
+
+    // Two cores, one core-second of work over a one-second window -> 50%.
+    metrics::Sample c = a; c.cpu_count = 2;
+    metrics::Sample d = b; d.cpu_count = 2; d.cpu_active_us = 1'000'000;
+    check(metrics::cpu_percent(c, d) > 49.9 && metrics::cpu_percent(c, d) < 50.1,
+          "cpu_percent: half-busy dual core -> 50%");
+
+    // First cycle (no prev) and counter reset both refuse to compute.
+    metrics::Sample none;
+    check(metrics::cpu_percent(none, b) < 0, "cpu_percent: no prior sample -> -1");
+    metrics::Sample reset = b; reset.wall_us = 3'000'000; reset.cpu_active_us = 5;
+    check(metrics::cpu_percent(b, reset) < 0, "cpu_percent: counter reset -> -1");
+
+    // Body shape: absolute gauges present on the first cycle; rates (CPU%,
+    // network) absent because prev is invalid; instance id is dimensioned.
+    metrics::Sample cur;
+    cur.valid = true; cur.wall_us = 2'000'000; cur.cpu_count = 2;
+    cur.mem_total = 1000; cur.mem_used = 250;
+    cur.disk_total = 2000; cur.disk_used = 500;
+    cur.net_rx_bytes = 4242; cur.net_tx_bytes = 99; cur.thread_count = 37;
+    std::string first = metrics::build_put_body("DeBeOS/Host", "i-abc", metrics::Sample(), cur);
+    check(first.find("Action=PutMetricData") == 0, "body starts with the action");
+    check(first.find("Version=2010-08-01") != std::string::npos, "body carries the API version");
+    check(first.find("Namespace=DeBeOS%2FHost") != std::string::npos, "namespace is URL-encoded");
+    check(first.find("MemoryUtilization") != std::string::npos, "memory gauge present");
+    check(first.find("Value=25.00") != std::string::npos, "memory util is 25%");
+    check(first.find("DiskUtilization") != std::string::npos, "disk gauge present");
+    check(first.find("Dimensions.member.1.Value=i-abc") != std::string::npos, "dimensioned by instance");
+    check(first.find("CPUUtilization") == std::string::npos, "no CPU% without a prior sample");
+    check(first.find("NetworkInBytes") == std::string::npos, "no network rate on first cycle");
+
+    // Second cycle: CPU% and the network deltas now appear.
+    metrics::Sample prev = cur;
+    metrics::Sample next = cur;
+    next.wall_us = 3'000'000; next.cpu_active_us = prev.cpu_active_us + 500'000;
+    next.net_rx_bytes = 5242; next.net_tx_bytes = 199;
+    std::string second = metrics::build_put_body("DeBeOS/Host", "i-abc", prev, next);
+    check(second.find("CPUUtilization") != std::string::npos, "CPU% present with a prior sample");
+    check(second.find("NetworkInBytes") != std::string::npos, "network in-rate present");
+    check(second.find("Value=1000") != std::string::npos, "network in delta is 1000 bytes");
+}
+
 }  // namespace
 
 int main() {
@@ -796,6 +850,7 @@ int main() {
     test_mgs_agentmessage();
     test_session_parsing();
     test_session_outbox();
+    test_metrics();
 
     std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

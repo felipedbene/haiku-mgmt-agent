@@ -127,4 +127,12 @@ http::Response fail_message(const std::string& region, const Credentials& creds,
 http::Response put_inventory(const std::string& region, const Credentials& creds,
                              const std::string& instance_id, const json::Value& items);
 
+// CloudWatch PutMetricData (F7/#119). CloudWatch metrics use the AWS Query
+// protocol, not JSON 1.1: an application/x-www-form-urlencoded POST to
+// monitoring.<region>.amazonaws.com, SigV4-signed with service name
+// "monitoring". `form_body` is the fully URL-encoded request body
+// (Action=PutMetricData&Version=2010-08-01&Namespace=...&MetricData.member...).
+http::Response put_metric_data(const std::string& region, const Credentials& creds,
+                               const std::string& form_body);
+
 }  // namespace aws
