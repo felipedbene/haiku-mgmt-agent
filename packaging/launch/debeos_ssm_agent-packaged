@@ -1,0 +1,25 @@
+# launch_daemon job for the *packaged* debeos-ssm-agent. Ships inside the hpkg
+# as data/launch/debeos_ssm_agent, so packagefs exposes it at
+# /boot/system/data/launch/debeos_ssm_agent and launch_daemon starts the agent
+# on every boot -- this is the self-register path the AMI bake relies on.
+#
+# The sibling file `debeos_ssm_agent` is the same job for a manual non-packaged
+# install (/boot/system/non-packaged/bin + settings/launch); its header
+# comments explain the service/legacy/no-network-condition choices, which apply
+# here unchanged.
+#
+# --metrics is default-on (F7/#119): the agent publishes host metrics
+# (CPU/memory/disk/network/threads) to CloudWatch namespace DeBeOS/Host every
+# 60s, computed from Haiku's own kernel counters. This needs
+# cloudwatch:PutMetricData on the instance role (CloudWatchAgentServerPolicy or
+# an equivalent grant). The metrics thread runs alongside the SSM poll loop,
+# Session Manager and self-update -- it is purely additive, so SSM is unchanged.
+#
+# To enable fleet self-update, append to the launch line:
+#   --update-manifest s3://<bucket>/<key>
+# The manifest must name a strictly newer version; see docs/design-roadmap.md.
+
+service x-vnd.debeos-ssm-agent {
+	launch /boot/system/bin/debeos-ssm-agent --metrics
+	legacy
+}

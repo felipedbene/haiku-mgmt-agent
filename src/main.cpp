@@ -47,7 +47,7 @@
 namespace {
 
 const char* kAgentName = "haiku-mgmt-agent";
-const char* kAgentVersion = "0.4.0";
+const char* kAgentVersion = "0.5.0";
 const char* kDefaultLogPath = "/var/log/haiku-mgmt-agent.log";
 const char* kLaunchJob = "x-vnd.haiku-mgmt-agent";
 const char* kDefaultBinaryPath = "/boot/system/non-packaged/bin/haiku-mgmt-agent";

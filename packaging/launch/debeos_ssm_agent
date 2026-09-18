@@ -1,8 +1,8 @@
-# launch_daemon job for haiku-mgmt-agent. Installed as
-# /boot/system/settings/launch/haiku-mgmt-agent, which the *system*
+# launch_daemon job for debeos-ssm-agent. Installed as
+# /boot/system/settings/launch/debeos_ssm_agent, which the *system*
 # launch_daemon reads (B_FIND_PATH_SETTINGS_DIRECTORY + "launch",
 # B_FIND_PATHS_SYSTEM_ONLY). Same placement and reasoning as the sshd and
-# cloud_init_lite jobs already on the Stage A AMI:
+# cloud_init_lite jobs on the AMI:
 #
 # - System context, not data/launch/user: the user target (app_server, Tracker,
 #   Deskbar) only runs inside a logged-in session, and on EC2 there is no
@@ -21,8 +21,11 @@
 # enough to fix the clock: Haiku on EC2 boots at 1970-01-01 with no NTP client,
 # which breaks TLS for everything else on the box until the agent corrects it
 # (see TESTING.md).
+#
+# --metrics is default-on (F7/#119): host metrics to CloudWatch DeBeOS/Host.
+# See the -packaged sibling for the full rationale and IAM requirement.
 
-service x-vnd.haiku-mgmt-agent {
-	launch /boot/system/non-packaged/bin/haiku-mgmt-agent
+service x-vnd.debeos-ssm-agent {
+	launch /boot/system/non-packaged/bin/debeos-ssm-agent --metrics
 	legacy
 }
