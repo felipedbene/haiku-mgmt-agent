@@ -18,7 +18,7 @@ CXX         := $(CT)/bin/$(CROSS)-g++
 STRIP       := $(CT)/bin/$(CROSS)-strip
 
 SRC         := src/json.cpp src/util.cpp src/log.cpp src/http.cpp src/aws.cpp \
-               src/s3.cpp src/selfupdate.cpp src/patch.cpp \
+               src/s3.cpp src/selfupdate.cpp src/patch.cpp src/metrics.cpp \
                src/websocket.cpp src/mgs.cpp src/session.cpp \
                src/exec.cpp src/runner.cpp src/timesync.cpp src/main.cpp
 OBJ         := $(patsubst src/%.cpp,build/%.o,$(SRC))
@@ -53,7 +53,7 @@ HOST_CXX      ?= g++
 HOST_MBEDTLS  ?= /usr
 TEST_SRC      := tests/test_main.cpp src/json.cpp src/util.cpp src/log.cpp src/runner.cpp \
                  src/exec.cpp src/aws.cpp src/http.cpp src/s3.cpp src/patch.cpp \
-                 src/websocket.cpp src/mgs.cpp src/session.cpp
+                 src/metrics.cpp src/websocket.cpp src/mgs.cpp src/session.cpp
 check:
 	@mkdir -p build
 	$(HOST_CXX) -std=c++17 -O1 -g -Wall -Isrc -I$(HOST_MBEDTLS)/include $(TEST_SRC) \

@@ -348,4 +348,64 @@ http::Response put_inventory(const std::string& region, const Credentials& creds
     return call("ssm", kSsmTargetPrefix, "PutInventory", region, creds, json::dump(b));
 }
 
+http::Response put_metric_data(const std::string& region, const Credentials& creds,
+                               const std::string& form_body) {
+    http::Response bad;
+    if (creds.empty()) {
+        bad.error = "no credentials available";
+        return bad;
+    }
+
+    // Query-protocol POST: form body to "/", signed for service "monitoring".
+    // Same canonical-request shape as call(), but Content-Type is form-urlencoded
+    // and there is no X-Amz-Target. Content-Type is signed (mirrors call()).
+    const char* kFormContentType = "application/x-www-form-urlencoded";
+    const std::string host = endpoint("monitoring", region);
+    const int64_t now = util::now_epoch();
+    const std::string amzdate = util::amz_date(now);
+    const std::string datestamp = util::amz_datestamp(now);
+    const std::string payload_hash = util::sha256_hex(form_body);
+
+    std::vector<std::pair<std::string, std::string>> signed_headers = {
+        {"content-type", kFormContentType},
+        {"host", host},
+        {"x-amz-date", amzdate},
+    };
+    if (!creds.token.empty()) signed_headers.push_back({"x-amz-security-token", creds.token});
+    std::sort(signed_headers.begin(), signed_headers.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::string canonical_headers, signed_names;
+    for (size_t i = 0; i < signed_headers.size(); i++) {
+        canonical_headers += signed_headers[i].first + ":" + signed_headers[i].second + "\n";
+        if (i) signed_names += ";";
+        signed_names += signed_headers[i].first;
+    }
+
+    const std::string canonical_request =
+        "POST\n/\n\n" + canonical_headers + "\n" + signed_names + "\n" + payload_hash;
+    const std::string scope = datestamp + "/" + region + "/monitoring/aws4_request";
+    const std::string string_to_sign =
+        "AWS4-HMAC-SHA256\n" + amzdate + "\n" + scope + "\n" + util::sha256_hex(canonical_request);
+    const std::string signature = util::to_hex(
+        util::hmac_sha256(signing_key(creds.secret_key, datestamp, region, "monitoring"),
+                          string_to_sign));
+
+    http::Request req;
+    req.method = "POST";
+    req.tls = true;
+    req.host = host;
+    req.path = "/";
+    req.body = form_body;
+    req.timeout_ms = 25000;
+    req.headers.push_back({"Content-Type", kFormContentType});
+    req.headers.push_back({"X-Amz-Date", amzdate});
+    if (!creds.token.empty()) req.headers.push_back({"X-Amz-Security-Token", creds.token});
+    req.headers.push_back({"Authorization",
+                           "AWS4-HMAC-SHA256 Credential=" + creds.access_key + "/" + scope +
+                               ", SignedHeaders=" + signed_names + ", Signature=" + signature});
+    req.headers.push_back({"User-Agent", "haiku-mgmt-agent"});
+    return http::perform(req);
+}
+
 }  // namespace aws

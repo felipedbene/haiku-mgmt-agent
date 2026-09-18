@@ -35,6 +35,7 @@
 #include "http.h"
 #include "json.h"
 #include "log.h"
+#include "metrics.h"
 #include "patch.h"
 #include "runner.h"
 #include "s3.h"
@@ -56,6 +57,10 @@ const char* kDefaultBinaryPath = "/boot/system/non-packaged/bin/haiku-mgmt-agent
 constexpr int kPollHttpTimeoutMs = 25000;
 constexpr int kHealthIntervalSeconds = 300;  // healthcheck.go default: 5 minutes
 constexpr int kUpdateIntervalSeconds = 3600;
+// CloudWatch metrics (F7/#119). Opt-in in the daemon; 60 s matches the CW
+// standard-resolution period and keeps PutMetricData well inside the free tier.
+const char* kDefaultMetricsNamespace = "DeBeOS/Host";
+constexpr int kDefaultMetricsIntervalSeconds = 60;
 constexpr size_t kDedupHistory = 512;
 // With S3 output there is somewhere to put a full build log, so capture far
 // more than the 24 KB inline clip. Bounded: builders have 4-8 GiB total.
@@ -83,6 +88,9 @@ struct Options {
     bool session_manager = true;  // open the MGS control channel for Session Manager
     std::string update_manifest;  // empty => no self-update polling
     std::string binary_path = kDefaultBinaryPath;
+    bool metrics = false;  // publish host metrics to CloudWatch (F7/#119)
+    std::string metrics_namespace = kDefaultMetricsNamespace;
+    int metrics_interval = kDefaultMetricsIntervalSeconds;
 };
 
 // Haiku boots at epoch 0 with no NTP client, so this is not optional in practice.
@@ -104,6 +112,9 @@ void usage() {
         "                         self-update when it names a newer version\n"
         "  --binary-path PATH     where a raw-binary self-update swaps the executable\n"
         "                         (default %s)\n"
+        "  --metrics              publish host metrics (CPU/mem/disk/net) to CloudWatch\n"
+        "  --metrics-namespace N  CloudWatch namespace (default DeBeOS/Host)\n"
+        "  --metrics-interval S   seconds between PutMetricData cycles (default 60)\n"
         "  --foreground           log to stderr as well as the log file\n"
         "  --log-file PATH        default %s\n"
         "  --log-level L          debug|info|warn|error (default info)\n"
@@ -117,7 +128,10 @@ void usage() {
         "                         --no-report skips the PutInventory compliance upload\n"
         "  self-update --manifest URI [--restart]\n"
         "                         check the manifest now; install a newer version;\n"
-        "                         with --restart, restart the launch_daemon service after\n",
+        "                         with --restart, restart the launch_daemon service after\n"
+        "  metrics ping [--namespace N] [--interval S]\n"
+        "                         collect two samples S seconds apart and publish one\n"
+        "                         PutMetricData batch to CloudWatch (default DeBeOS/Host, 5s)\n",
         kAgentVersion, kDefaultBinaryPath, kDefaultLogPath);
 }
 
@@ -628,12 +642,77 @@ int cmd_self_update(int argc, char** argv) {
     }
 }
 
+// F7/#119, manual: `metrics ping [--namespace N] [--interval S]` -- take two
+// samples S seconds apart (CPU% needs a delta) and publish one PutMetricData
+// batch, printing the values sent so the operator can eyeball them against the
+// CloudWatch console. The same collection code the daemon --metrics loop runs.
+int cmd_metrics(int argc, char** argv) {
+    if (argc < 3 || std::strcmp(argv[2], "ping") != 0) {
+        std::fprintf(stderr, "usage: %s metrics ping [--namespace N] [--interval S]\n", kAgentName);
+        return 2;
+    }
+    std::string ns = kDefaultMetricsNamespace;
+    int interval = 5;
+    for (int i = 3; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--namespace" && i + 1 < argc) { ns = argv[++i]; continue; }
+        if (a == "--interval" && i + 1 < argc) { interval = std::atoi(argv[++i]); continue; }
+        std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
+        return 2;
+    }
+    if (interval < 1) interval = 1;
+
+    Agent agent;
+    aws::CredentialProvider provider(&agent.imds);
+    if (!cli_bootstrap(agent, provider)) return 1;
+
+    metrics::Sample prev = metrics::collect();
+    if (!prev.valid) {
+        std::fprintf(stderr, "error: get_system_info failed; cannot read host metrics\n");
+        return 1;
+    }
+    for (int s = 0; s < interval; s++) ::sleep(1);
+    metrics::Sample cur = metrics::collect();
+
+    const double cpu = metrics::cpu_percent(prev, cur);
+    std::printf("host sample (%d cpus, %ds window):\n", cur.cpu_count, interval);
+    if (cpu >= 0) std::printf("  CPUUtilization    %.2f %%\n", cpu);
+    if (cur.mem_total > 0)
+        std::printf("  MemoryUtilization %.2f %% (%llu / %llu bytes)\n",
+                    100.0 * (double)cur.mem_used / cur.mem_total,
+                    (unsigned long long)cur.mem_used, (unsigned long long)cur.mem_total);
+    if (cur.disk_total > 0)
+        std::printf("  DiskUtilization   %.2f %% (%llu / %llu bytes)\n",
+                    100.0 * (double)cur.disk_used / cur.disk_total,
+                    (unsigned long long)cur.disk_used, (unsigned long long)cur.disk_total);
+    std::printf("  NetworkIn/Out     %llu / %llu bytes this window\n  ThreadCount       %u\n",
+                (unsigned long long)(cur.net_rx_bytes - prev.net_rx_bytes),
+                (unsigned long long)(cur.net_tx_bytes - prev.net_tx_bytes), cur.thread_count);
+
+    const std::string body = metrics::build_put_body(ns, agent.id.instance_id, prev, cur);
+    aws::Credentials c;
+    if (!provider.get(c)) {
+        std::fprintf(stderr, "error: no credentials\n");
+        return 1;
+    }
+    http::Response r = aws::put_metric_data(agent.id.region, c, body);
+    if (!r.ok()) {
+        std::fprintf(stderr, "PutMetricData failed: status=%d %s\n%s\n", r.status, r.error.c_str(),
+                     util::clip(r.body, 500, "...").c_str());
+        return 1;
+    }
+    std::printf("PutMetricData -> %s ok (namespace %s, instance %s)\n", r.status ? "200" : "?",
+                ns.c_str(), agent.id.instance_id.c_str());
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "s3") == 0) return cmd_s3(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "patch") == 0) return cmd_patch(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "self-update") == 0) return cmd_self_update(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "metrics") == 0) return cmd_metrics(argc, argv);
 
     Options opt;
     for (int i = 1; i < argc; i++) {
@@ -647,6 +726,9 @@ int main(int argc, char** argv) {
         if (a == "--no-session-manager") { opt.session_manager = false; continue; }
         if (a == "--update-manifest" && i + 1 < argc) { opt.update_manifest = argv[++i]; continue; }
         if (a == "--binary-path" && i + 1 < argc) { opt.binary_path = argv[++i]; continue; }
+        if (a == "--metrics") { opt.metrics = true; continue; }
+        if (a == "--metrics-namespace" && i + 1 < argc) { opt.metrics_namespace = argv[++i]; continue; }
+        if (a == "--metrics-interval" && i + 1 < argc) { opt.metrics_interval = std::atoi(argv[++i]); continue; }
         if (a == "--log-file" && i + 1 < argc) { opt.log_path = argv[++i]; continue; }
         if (a == "--log-level" && i + 1 < argc) {
             std::string l = argv[++i];
@@ -799,6 +881,29 @@ int main(int argc, char** argv) {
         });
     }
 
+    // F7/#119: CloudWatch host metrics. Own thread, same resilience pattern as
+    // the health ping. Uses Haiku's own kernel counters (get_system_info /
+    // get_cpu_info) so CPUUtilization is the true busy% -- not the hypervisor
+    // number, which under-reports a Haiku/arm64 guest by ~55x (DeBeOS #140).
+    std::thread metrics_thread;
+    if (opt.metrics) {
+        if (opt.metrics_interval < 5) opt.metrics_interval = 5;
+        metrics_thread = std::thread([&agent, &provider, &opt]() {
+            metrics::Sample prev = metrics::collect();  // seed; first delta is next cycle
+            int64_t next = util::now_epoch() + opt.metrics_interval;
+            logging::logf(logging::Info, "metrics: publishing to %s every %ds",
+                          opt.metrics_namespace.c_str(), opt.metrics_interval);
+            while (!g_stop.load()) {
+                if (util::now_epoch() >= next) {
+                    metrics::emit(provider, agent.id.region, opt.metrics_namespace,
+                                  agent.id.instance_id, prev);
+                    next = util::now_epoch() + opt.metrics_interval;
+                }
+                ::sleep(1);
+            }
+        });
+    }
+
     unsigned seed = static_cast<unsigned>(util::now_epoch_ms() ^ ::getpid());
     while (!g_stop.load()) {
         const int64_t elapsed = agent.poll_once();
@@ -820,6 +925,7 @@ int main(int argc, char** argv) {
     health.join();
     if (updater.joinable()) updater.join();
     if (session_thread.joinable()) session_thread.join();
+    if (metrics_thread.joinable()) metrics_thread.join();
     logging::logf(logging::Info, "%s stopped", kAgentName);
     return 0;
 }

@@ -196,6 +196,44 @@ propagates, `exit` closes cleanly and the console shows the session Terminated. 
 the instance role needs the `ssmmessages:*` actions (already in
 `AmazonSSMManagedInstanceCore`).
 
+### F7 — CloudWatch metrics (implemented on `feat/119-native-cloudwatch`, live gates PASS)
+Native host observability (issue #119): publish CPU/memory/disk/network to
+CloudWatch so a Haiku/arm64 fleet is observable without a Linux sidecar. The
+upstream CW agent is Go and not built for Haiku; a minimal native emitter keeps
+the self-contained-on-a-base-image property (no aws-sdk, no extra deps).
+
+- **Collection (`src/metrics.cpp`)** reads Haiku's own kernel counters:
+  `get_system_info` (memory pages, thread count), `get_cpu_info::active_time`
+  (usec of useful work per CPU since boot), `statvfs("/boot")` (disk), and
+  `SIOCGIFCONF`+`SIOCGIFSTATS` (per-interface rx/tx bytes). CPU% is
+  `Δactive_time / (Δwall × cpu_count)`, clamped to [0,100].
+- **Why native, not the hypervisor number:** the EC2 platform-side
+  CPUUtilization for a Haiku/arm64 guest under-reports by ~55x (DeBeOS #140) —
+  measured directly here: a box pinned at ~100% read **1.83%** in AWS/EC2. The
+  guest's own `active_time` is the true figure and the whole point of F7.
+- **Wire (`aws::put_metric_data`)** — CloudWatch metrics use the AWS **Query
+  protocol**, not JSON 1.1: an `application/x-www-form-urlencoded` POST to
+  `monitoring.<region>.amazonaws.com`, `Action=PutMetricData&Version=2010-08-01`,
+  SigV4-signed with signing name `monitoring`. Reuses the existing SigV4/TLS/HTTP
+  core; namespace `DeBeOS/Host`, one dimension `InstanceId`.
+- **Surfaces:** `metrics ping [--namespace N] [--interval S]` (on-box test:
+  collect two samples S apart, publish one batch, print the values), and a
+  daemon `--metrics [--metrics-namespace N] [--metrics-interval S]` thread
+  (opt-in; own thread, same resilience pattern as the health ping).
+- **IAM:** the instance role needs `cloudwatch:PutMetricData` (not in
+  `AmazonSSMManagedInstanceCore`) — document as a consumer requirement, same
+  shape as F1/F2's S3 perms.
+
+*Logs (`PutLogEvents`) — deferred.* CloudWatch Logs is AWS JSON 1.1
+(`logs.<region>`, `X-Amz-Target: Logs_20140328.PutLogEvents`) and rides the
+existing `aws::call()`; a small follow-up would tail `/var/log/haiku-mgmt-agent.log`
+into a log group (CreateLogGroup/CreateLogStream + sequence-token handling).
+
+*Verify (PASS, 2026-09-18):* on a live c7g.large, `agent metrics ping
+--namespace DeBeOS/Host` → HTTP 200; `list-metrics --namespace DeBeOS/Host`
+shows all nine metrics; under a full 2-thread load the native CPUUtilization
+read 99.99% while AWS/EC2 read 1.83% for the same window (#140 confirmed).
+
 ## 3. Suggested implementation order
 F1 first (unblocks F2 + F3 and the fleet's I/O autonomy) → F2 (trivial once F1 lands)
 → F4 (bake, needs human auth for the packaging gate) → F3 (self-update, nice-to-have).
