@@ -1,0 +1,25 @@
+name			debeos_cloudwatch
+version			@VERSION@
+architecture		@ARCH@
+summary			"CloudWatch host-metrics daemon for DeBeOS on EC2"
+description		"Standalone daemon that publishes host metrics
+(CPU/memory/disk/network/threads) to CloudWatch namespace DeBeOS/Host from
+Haiku's own kernel counters -- a true CPU busy%, not the hypervisor number that
+under-reports a Haiku/arm64 guest by ~55x (DeBeOS #140). Authenticates with the
+instance role via IMDSv2 + SigV4. It does NOT register as an SSM node or
+heartbeat (that is the amazon-ssm-agent's job); it only ever calls
+PutMetricData. Self-contained: static mbedTLS, own HTTP/SigV4/JSON, bundled
+trust anchors."
+vendor			"DeBeOS"
+packager		"DeBeOS <https://github.com/felipedbene/haiku-mgmt-agent>"
+copyrights		{ "2026 Felipe de Bene and DeBeOS contributors" }
+licenses		{ "MIT" }
+
+provides {
+	debeos_cloudwatch = @PLAIN_VERSION@
+	cmd:debeos_cloudwatch = @PLAIN_VERSION@
+}
+
+requires {
+	haiku
+}
