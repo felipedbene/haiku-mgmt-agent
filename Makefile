@@ -24,19 +24,36 @@ SRC         := src/json.cpp src/util.cpp src/log.cpp src/http.cpp src/aws.cpp \
 OBJ         := $(patsubst src/%.cpp,build/%.o,$(SRC))
 BIN         := build/haiku-mgmt-agent
 
+# debeos-cloudwatch: the standalone CloudWatch host-metrics daemon (#119). It
+# reuses the shared SigV4/TLS/HTTP/JSON + metrics + timesync code but NONE of
+# the SSM machinery (no MDS/MGS/runner), so it never registers an SSM node --
+# that job is the official amazon-ssm-agent's, and a second heartbeat wedges Run
+# Command. It is a separate binary + hpkg, packaged and launched on its own.
+CW_SRC      := src/json.cpp src/util.cpp src/log.cpp src/http.cpp src/aws.cpp \
+               src/metrics.cpp src/timesync.cpp src/cw_metrics_main.cpp
+CW_OBJ      := $(patsubst src/%.cpp,build/%.o,$(CW_SRC))
+CW_BIN      := build/debeos-cloudwatch
+
 CXXFLAGS    ?= -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter
 CXXFLAGS    += -I$(MBEDTLS)/include -Isrc
 # Static TLS, so the binary has no dependency that haiku/arm64 cannot satisfy.
 LDFLAGS     ?= -L$(MBEDTLS)/lib
 LDLIBS      := -lmbedtls -lmbedx509 -lmbedcrypto -lnetwork
 
-.PHONY: all clean check strip
+.PHONY: all clean check strip cloudwatch strip-cloudwatch
 
-all: $(BIN)
+all: $(BIN) $(CW_BIN)
 
 $(BIN): $(OBJ)
 	@mkdir -p build
 	$(CXX) $(OBJ) $(LDFLAGS) $(LDLIBS) -o $@
+	@echo "built $@"
+
+cloudwatch: $(CW_BIN)
+
+$(CW_BIN): $(CW_OBJ)
+	@mkdir -p build
+	$(CXX) $(CW_OBJ) $(LDFLAGS) $(LDLIBS) -o $@
 	@echo "built $@"
 
 build/%.o: src/%.cpp
@@ -45,6 +62,9 @@ build/%.o: src/%.cpp
 
 strip: $(BIN)
 	$(STRIP) $(BIN)
+
+strip-cloudwatch: $(CW_BIN)
+	$(STRIP) $(CW_BIN)
 
 # ---- host-side unit tests -------------------------------------------------
 # Run the pure-logic tests (JSON, SigV4 vectors, parameter substitution,
