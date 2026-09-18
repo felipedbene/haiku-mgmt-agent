@@ -78,7 +78,7 @@ void collect_net(Sample& s) {
         if (std::strncmp(entry->ifr_name, "loop", 4) != 0) {
             ifreq r;
             std::memset(&r, 0, sizeof(r));
-            std::strncpy(r.ifr_name, entry->ifr_name, IF_NAMESIZE - 1);
+            std::snprintf(r.ifr_name, IF_NAMESIZE, "%s", entry->ifr_name);
             if (::ioctl(fd, SIOCGIFSTATS, &r, sizeof(r)) == 0) {
                 s.net_rx_bytes += r.ifr_stats.receive.bytes;
                 s.net_tx_bytes += r.ifr_stats.send.bytes;

@@ -1,5 +1,35 @@
 # Testing — haiku-mgmt-agent
 
+## F7 (CloudWatch metrics, `feat/119-native-cloudwatch`) — host + live gates PASS
+
+**Date:** 2026-09-18. Native host metrics → CloudWatch `PutMetricData` (issue
+#119). Host-side: `make check` at **480 checks, 0 failures**, including the new
+`test_metrics` (CPU% arithmetic across two samples, first-cycle/counter-reset
+guards, and the Query-protocol body shape). `metrics.cpp`, `aws.cpp`, `main.cpp`
+compile warning-free (`-Wall -Wextra`).
+
+Live gates (real Graviton **c7g.large**, canonical `ami-04493ac7c3fe0d304`,
+hrev59996, us-west-2, instance role = `AmazonSSMManagedInstanceCore` +
+`cloudwatch:PutMetricData`):
+
+| gate | result |
+|---|---|
+| SigV4 for service `monitoring` + Query body accepted by CloudWatch | PASS — `PutMetricData` → HTTP 200 |
+| Native `metrics ping` collects + publishes via the instance role | PASS — `agent metrics ping --namespace DeBeOS/Host` → 200 |
+| Metrics land under `DeBeOS/Host`, dimensioned by InstanceId | PASS — `list-metrics` shows all 9 (CPU/Memory×3/Disk×2/Network×2/ThreadCount) |
+| CPUUtilization is accurate, not the ~55x-under hypervisor number (#140) | PASS — 2 busy threads on 2 vCPU → **99.99%** native (idle probe → 0.26%); AWS/EC2 hypervisor read **1.83% max** for the same instance/window |
+| MemoryUtilization / DiskUtilization / ThreadCount land as gauges | PASS — 12.67% / 20.68% / 101 in `get-metric-statistics` |
+
+CPU% is computed on-box from `cpu_info::active_time` (usec of useful work since
+boot) summed over CPUs, divided by `Δwall × cpu_count` — Haiku's own counter,
+which spans the full 0→100% range under load. The hypervisor-derived AWS/EC2
+CPUUtilization under-reports a Haiku/arm64 guest by ~55x (measured here: ~1.8%
+vs a pinned ~100%), which is the whole reason this feature reads native counters.
+
+Logs (`PutLogEvents`) — NOT implemented in this pass; `logs.<region>` is AWS
+JSON 1.1 and rides the existing `aws::call()`, so it is a small follow-up
+(design noted in `docs/design-roadmap.md` F7). Status: DEFERRED.
+
 ## Phase 3 (v0.4.0, `phase3-patch-manager`) — host-validated, live gates PENDING
 
 **Date:** 2026-08-29. Host-side: 209/209 unit checks pass (`make check`),
