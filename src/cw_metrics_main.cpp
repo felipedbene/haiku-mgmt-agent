@@ -14,6 +14,11 @@
 //
 // The metrics collection + emit is identical to metrics::emit used by the agent
 // (src/metrics.cpp); this file is only the standalone entry point and loop.
+//
+// Optionally (opt-in via --logs) it also tails a log file -- the DeBeOS syslog
+// by default -- into CloudWatch Logs (cwlogs::emit), on its own interval but on
+// this same single thread, so the two never contend. Like the metrics path it
+// makes no SSM calls, so it never disturbs the amazon-ssm-agent.
 
 #include <signal.h>
 #include <unistd.h>
@@ -26,6 +31,7 @@
 
 #include "aws.h"
 #include "ca_certs.h"
+#include "cwlogs.h"
 #include "http.h"
 #include "log.h"
 #include "metrics.h"
@@ -39,6 +45,11 @@ const char* kVersion = "0.1.0";
 const char* kDefaultNamespace = "DeBeOS/Host";
 const char* kDefaultLogPath = "/var/log/debeos-cloudwatch.log";
 constexpr int kDefaultIntervalSeconds = 60;
+// CloudWatch Logs (opt-in). Default source is the system syslog; the stream
+// name defaults to the instance id (set after IMDS identity).
+const char* kDefaultLogsGroup = "DeBeOS/syslog";
+const char* kDefaultLogsSource = "/var/log/syslog";
+constexpr int kDefaultLogsIntervalSeconds = 30;
 // Haiku boots at epoch 0 with no NTP client; correcting it is not optional for
 // TLS/SigV4 (see timesync.h). IMDS is plain HTTP, reachable before TLS works.
 constexpr int64_t kMaxClockDriftSeconds = 60;
@@ -60,8 +71,14 @@ void usage() {
         "  --no-time-sync    do not set the system clock from IMDS\n"
         "  --log-file PATH   default %s\n"
         "  --log-level L     debug|info|warn|error (default info)\n"
+        "  --logs            also tail a log file into CloudWatch Logs (opt-in)\n"
+        "  --logs-source P   file to tail (default %s)\n"
+        "  --logs-group N    CloudWatch Logs group (default %s)\n"
+        "  --logs-stream N   log stream name (default: this instance id)\n"
+        "  --logs-interval S seconds between PutLogEvents cycles (default %d, min 5)\n"
         "  --version         print version and exit\n",
-        kName, kVersion, kDefaultLogPath);
+        kName, kVersion, kDefaultLogPath, kDefaultLogsSource, kDefaultLogsGroup,
+        kDefaultLogsIntervalSeconds);
 }
 
 }  // namespace
@@ -74,6 +91,11 @@ int main(int argc, char** argv) {
     bool time_sync = true;
     std::string log_path = kDefaultLogPath;
     logging::Level level = logging::Info;
+    bool logs_enabled = false;
+    std::string logs_source = kDefaultLogsSource;
+    std::string logs_group = kDefaultLogsGroup;
+    std::string logs_stream;  // default set to instance id after IMDS
+    int logs_interval = kDefaultLogsIntervalSeconds;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -83,6 +105,11 @@ int main(int argc, char** argv) {
         if (a == "--foreground") { foreground = true; continue; }
         if (a == "--no-time-sync") { time_sync = false; continue; }
         if (a == "--log-file" && i + 1 < argc) { log_path = argv[++i]; continue; }
+        if (a == "--logs") { logs_enabled = true; continue; }
+        if (a == "--logs-source" && i + 1 < argc) { logs_source = argv[++i]; continue; }
+        if (a == "--logs-group" && i + 1 < argc) { logs_group = argv[++i]; continue; }
+        if (a == "--logs-stream" && i + 1 < argc) { logs_stream = argv[++i]; continue; }
+        if (a == "--logs-interval" && i + 1 < argc) { logs_interval = std::atoi(argv[++i]); continue; }
         if (a == "--log-level" && i + 1 < argc) {
             std::string l = argv[++i];
             level = (l == "debug") ? logging::Debug
@@ -98,10 +125,14 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (interval < 5) interval = 5;
+    if (logs_interval < 5) logs_interval = 5;
 
     logging::init(log_path, level, foreground);
     logging::logf(logging::Info, "%s %s starting (namespace %s, interval %ds)",
                   kName, kVersion, ns.c_str(), interval);
+    if (logs_enabled)
+        logging::logf(logging::Info, "%s CloudWatch Logs on: %s -> group %s, interval %ds",
+                      kName, logs_source.c_str(), logs_group.c_str(), logs_interval);
 
     ::signal(SIGPIPE, SIG_IGN);
     ::signal(SIGTERM, on_signal);
@@ -133,21 +164,40 @@ int main(int argc, char** argv) {
 
     metrics::Sample prev = metrics::collect();  // seed; first delta is next cycle
 
+    cwlogs::Options logs_opt;
+    cwlogs::State logs_state;
+    if (logs_enabled) {
+        logs_opt.source_path = logs_source;
+        logs_opt.group = logs_group;
+        logs_opt.stream = logs_stream.empty() ? id.instance_id : logs_stream;
+    }
+
     if (once) {
         for (int s = 0; s < 5 && !g_stop.load(); s++) ::sleep(1);
         bool ok = metrics::emit(provider, id.region, ns, id.instance_id, prev);
         logging::logf(logging::Info, "single cycle %s", ok ? "ok" : "failed");
+        if (logs_enabled) {
+            bool lok = cwlogs::emit(provider, id.region, logs_opt, logs_state);
+            logging::logf(logging::Info, "single logs cycle %s", lok ? "ok" : "failed");
+            ok = ok && lok;
+        }
         return ok ? 0 : 1;
     }
 
     int64_t next = util::now_epoch() + interval;
+    int64_t next_logs = util::now_epoch() + logs_interval;
     while (!g_stop.load()) {
-        if (util::now_epoch() >= next) {
+        const int64_t now = util::now_epoch();
+        if (now >= next) {
             // Re-check the clock each cycle: with no NTP it drifts, and drift
             // eventually breaks TLS/SigV4 outright.
             timesync::ensure_clock(imds, time_sync, kMaxClockDriftSeconds);
             metrics::emit(provider, id.region, ns, id.instance_id, prev);
             next = util::now_epoch() + interval;
+        }
+        if (logs_enabled && now >= next_logs) {
+            cwlogs::emit(provider, id.region, logs_opt, logs_state);
+            next_logs = util::now_epoch() + logs_interval;
         }
         ::sleep(1);
     }

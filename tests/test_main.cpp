@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "aws.h"
+#include "cwlogs.h"
 #include "exec.h"
 #include "json.h"
 #include "log.h"
@@ -820,6 +821,46 @@ void test_metrics() {
     check(second.find("Value=1000") != std::string::npos, "network in delta is 1000 bytes");
 }
 
+void test_cwlogs() {
+    std::printf("cwlogs\n");
+
+    // split_lines: complete lines emit; a trailing fragment is held in partial
+    // and stitched onto the next chunk; empty lines and bare \r are dropped.
+    std::string partial;
+    std::vector<std::string> lines;
+    cwlogs::split_lines("alpha\r\nbravo\n\ncharlie no newline", partial, lines);
+    check(lines.size() == 2, "split_lines: two complete lines (empty dropped)");
+    check_eq(lines.size() > 0 ? lines[0] : "", "alpha", "split_lines: CRLF stripped");
+    check_eq(lines.size() > 1 ? lines[1] : "", "bravo", "split_lines: second line");
+    check_eq(partial, "charlie no newline", "split_lines: fragment held in partial");
+
+    lines.clear();
+    cwlogs::split_lines(" and the rest\n", partial, lines);
+    check(lines.size() == 1 && lines[0] == "charlie no newline and the rest",
+          "split_lines: fragment completed on next chunk");
+    check(partial.empty(), "split_lines: partial cleared after completion");
+
+    // build_events: honors the event-count budget and stamps the timestamp.
+    std::vector<std::string> many = {"one", "two", "three", "four"};
+    size_t consumed = 0;
+    json::Value ev = cwlogs::build_events(many, 0, 1725000000000LL, /*max_events=*/2,
+                                          /*max_bytes=*/900000, /*max_line_bytes=*/8192, consumed);
+    check(consumed == 2, "build_events: stops at max_events");
+    check(ev.is_arr() && ev.array.size() == 2, "build_events: two events emitted");
+    std::string body = json::dump(ev);
+    check(body.find("\"message\":\"one\"") != std::string::npos, "build_events: message present");
+    check(body.find("1725000000000") != std::string::npos, "build_events: integral ms timestamp");
+
+    // A single oversized line still makes progress (clipped, consumed==1).
+    std::vector<std::string> big = {std::string(20000, 'x')};
+    consumed = 0;
+    json::Value one = cwlogs::build_events(big, 0, 1, 1000, 900000, /*max_line_bytes=*/8192,
+                                           consumed);
+    check(consumed == 1, "build_events: oversized line consumed");
+    check(one.array.size() == 1 && one.array[0].str_at("message").size() <= 8192 + 16,
+          "build_events: oversized line clipped to budget");
+}
+
 }  // namespace
 
 int main() {
@@ -851,6 +892,7 @@ int main() {
     test_session_parsing();
     test_session_outbox();
     test_metrics();
+    test_cwlogs();
 
     std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -135,4 +135,29 @@ http::Response put_inventory(const std::string& region, const Credentials& creds
 http::Response put_metric_data(const std::string& region, const Credentials& creds,
                                const std::string& form_body);
 
+// CloudWatch Logs (F7/#119). Unlike metrics, Logs speaks AWS JSON 1.1 on
+// logs.<region>.amazonaws.com with X-Amz-Target: Logs_20140328.<Op> and signing
+// name "logs" -- so these ride the existing call() unchanged.
+//
+// CreateLogGroup / CreateLogStream are idempotent for our purposes: a
+// ResourceAlreadyExistsException (HTTP 400) is a normal "already there", not a
+// failure. Callers treat it as success.
+http::Response create_log_group(const std::string& region, const Credentials& creds,
+                                const std::string& group);
+http::Response create_log_stream(const std::string& region, const Credentials& creds,
+                                 const std::string& group, const std::string& stream);
+
+// Fetch the stream's current uploadSequenceToken (empty for a never-written
+// stream). Used to seed the token at startup so we don't burn a cycle on the
+// first InvalidSequenceTokenException.
+http::Response describe_log_streams(const std::string& region, const Credentials& creds,
+                                    const std::string& group, const std::string& stream_prefix);
+
+// PutLogEvents. `events` is an ordered JSON array of {timestamp(ms),message}.
+// `sequence_token` empty => the field is omitted, which is what a fresh stream
+// (and, since 2023, any stream) accepts. The response carries nextSequenceToken.
+http::Response put_log_events(const std::string& region, const Credentials& creds,
+                              const std::string& group, const std::string& stream,
+                              const json::Value& events, const std::string& sequence_token);
+
 }  // namespace aws
