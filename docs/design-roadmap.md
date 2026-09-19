@@ -224,10 +224,30 @@ the self-contained-on-a-base-image property (no aws-sdk, no extra deps).
   `AmazonSSMManagedInstanceCore`) — document as a consumer requirement, same
   shape as F1/F2's S3 perms.
 
-*Logs (`PutLogEvents`) — deferred.* CloudWatch Logs is AWS JSON 1.1
-(`logs.<region>`, `X-Amz-Target: Logs_20140328.PutLogEvents`) and rides the
-existing `aws::call()`; a small follow-up would tail `/var/log/haiku-mgmt-agent.log`
-into a log group (CreateLogGroup/CreateLogStream + sequence-token handling).
+*Logs (`PutLogEvents`) — implemented (`feat/119-cloudwatch-logs`).* CloudWatch
+Logs is AWS JSON 1.1 (`logs.<region>`, `X-Amz-Target: Logs_20140328.<Op>`,
+signing name `logs`) and rides the existing `aws::call()` unchanged — the new
+`aws::create_log_group/create_log_stream/describe_log_streams/put_log_events`
+wrappers are three-line bodies over `call()`. `src/cwlogs.cpp` tails a file (the
+DeBeOS syslog `/var/log/syslog` by default), splits complete lines, batches them
+under the 10000-event / 1 MiB PutLogEvents limits, and ships them to log group
+`DeBeOS/syslog`, stream = instance id. It creates the group+stream on first use
+(ResourceAlreadyExists is success), seeds the upload sequence token from
+`DescribeLogStreams`, carries `nextSequenceToken` across cycles, and on an
+`InvalidSequenceTokenException` adopts the `expectedSequenceToken` and retries
+once (`DataAlreadyAccepted` → advance; `ResourceNotFound` → re-create). File
+rotation/truncation resets the tail offset.
+
+It is **opt-in** and folded into the standalone `debeos-cloudwatch` daemon on
+the *same single thread* as the metrics loop (its own `--logs-interval`, default
+30s), so it can never race the PutMetricData call and — like metrics — makes no
+SSM calls, so it never disturbs the `amazon-ssm-agent`. Enable it by appending
+`--logs` (plus optional `--logs-source/--logs-group/--logs-stream/--logs-interval`)
+to the daemon's launch line; the default-on metrics behavior is unchanged when
+`--logs` is absent. IAM: `logs:CreateLogGroup/CreateLogStream/PutLogEvents/
+DescribeLogStreams`, all in `CloudWatchAgentServerPolicy` (which the fleet's
+`ssm-instance-profile` already attaches), so no IAM change on the standard
+profile.
 
 *Verify (PASS, 2026-09-18):* on a live c7g.large, `agent metrics ping
 --namespace DeBeOS/Host` → HTTP 200; `list-metrics --namespace DeBeOS/Host`

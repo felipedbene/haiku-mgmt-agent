@@ -17,6 +17,14 @@
 #
 # Override the interval/namespace by appending e.g. `--interval 30` or
 # `--namespace DeBeOS/HostDev` to the launch line.
+#
+# CloudWatch Logs is OPT-IN and off by default (adding it would create a log
+# group and incur log-ingest cost on every fleet instance). To also tail the
+# syslog into CloudWatch Logs, append `--logs` (optionally
+# `--logs-source /var/log/syslog --logs-group DeBeOS/syslog --logs-interval 30`).
+# It runs on the same thread as the metrics loop and makes no SSM calls, so it
+# never contends with the amazon-ssm-agent. Needs logs:CreateLogGroup/
+# CreateLogStream/PutLogEvents (also in CloudWatchAgentServerPolicy).
 
 service x-vnd.debeos-cloudwatch {
 	launch /boot/system/bin/debeos-cloudwatch

@@ -12,6 +12,7 @@ namespace {
 const char* kImdsHost = "169.254.169.254";
 const char* kMdsTargetPrefix = "EC2WindowsMessageDeliveryService";  // historical name, all platforms
 const char* kSsmTargetPrefix = "AmazonSSM";
+const char* kLogsTargetPrefix = "Logs_20140328";
 const char* kJsonContentType = "application/x-amz-json-1.1";
 
 std::string endpoint(const std::string& service, const std::string& region) {
@@ -406,6 +407,46 @@ http::Response put_metric_data(const std::string& region, const Credentials& cre
                                ", SignedHeaders=" + signed_names + ", Signature=" + signature});
     req.headers.push_back({"User-Agent", "haiku-mgmt-agent"});
     return http::perform(req);
+}
+
+// ------------------------------------------------------------- CloudWatch Logs
+
+http::Response create_log_group(const std::string& region, const Credentials& creds,
+                                const std::string& group) {
+    json::Value b = json::obj();
+    b.object["logGroupName"] = json::str(group);
+    return call("logs", kLogsTargetPrefix, "CreateLogGroup", region, creds, json::dump(b));
+}
+
+http::Response create_log_stream(const std::string& region, const Credentials& creds,
+                                 const std::string& group, const std::string& stream) {
+    json::Value b = json::obj();
+    b.object["logGroupName"] = json::str(group);
+    b.object["logStreamName"] = json::str(stream);
+    return call("logs", kLogsTargetPrefix, "CreateLogStream", region, creds, json::dump(b));
+}
+
+http::Response describe_log_streams(const std::string& region, const Credentials& creds,
+                                    const std::string& group, const std::string& stream_prefix) {
+    json::Value b = json::obj();
+    b.object["logGroupName"] = json::str(group);
+    b.object["logStreamNamePrefix"] = json::str(stream_prefix);
+    b.object["limit"] = json::num(1);
+    return call("logs", kLogsTargetPrefix, "DescribeLogStreams", region, creds, json::dump(b));
+}
+
+http::Response put_log_events(const std::string& region, const Credentials& creds,
+                              const std::string& group, const std::string& stream,
+                              const json::Value& events, const std::string& sequence_token) {
+    json::Value b = json::obj();
+    b.object["logGroupName"] = json::str(group);
+    b.object["logStreamName"] = json::str(stream);
+    b.object["logEvents"] = events;
+    // A fresh stream carries no token; omitting the field (rather than sending
+    // "") is what the API wants. Since 2023 the token is optional even for a
+    // written stream, but we still round-trip it to stay correct on older paths.
+    if (!sequence_token.empty()) b.object["sequenceToken"] = json::str(sequence_token);
+    return call("logs", kLogsTargetPrefix, "PutLogEvents", region, creds, json::dump(b));
 }
 
 }  // namespace aws
